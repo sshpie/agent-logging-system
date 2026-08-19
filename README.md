@@ -3,10 +3,10 @@
 <h4 align="center">Operational monitor for multi-agent AI. Per-action observations, per-agent trends, baseline-relative alarms, named recommendations.</h4>
 
 <p align="center">
-  <a href="https://github.com/nuclide-research/agent-logging-system/actions/workflows/tests.yml"><img src="https://img.shields.io/github/actions/workflow/status/nuclide-research/agent-logging-system/tests.yml?label=tests&style=flat-square" alt="tests"></a>
-  <a href="https://github.com/nuclide-research/agent-logging-system/blob/main/LICENSE"><img src="https://img.shields.io/github/license/nuclide-research/agent-logging-system?style=flat-square" alt="license"></a>
+  <a href="https://github.com/sshpie/agent-logging-system/actions/workflows/tests.yml"><img src="https://img.shields.io/github/actions/workflow/status//agent-logging-system/tests.yml?label=tests&style=flat-square" alt="tests"></a>
+  <a href="https://github.com/sshpie/agent-logging-system/blob/main/LICENSE"><img src="https://img.shields.io/github/license//agent-logging-system?style=flat-square" alt="license"></a>
   <a href="https://www.python.org"><img src="https://img.shields.io/badge/python-3.9%2B-3776AB?style=flat-square&logo=python" alt="python"></a>
-  <a href="https://nuclide-research.com"><img src="https://img.shields.io/badge/by-NuClide-blue?style=flat-square" alt="NuClide"></a>
+  <a href="https://"><img src="https://img.shields.io/badge/by--blue?style=flat-square" alt=""></a>
 </p>
 
 <p align="center">
@@ -47,7 +47,7 @@ pip install agent-logging-system
 Or from source:
 
 ```bash
-git clone https://github.com/nuclide-research/agent-logging-system
+git clone https://github.com/sshpie/agent-logging-system
 cd agent-logging-system
 pip install -e .             # editable install
 pip install -e ".[dev]"      # plus test deps
@@ -233,12 +233,12 @@ agent-logging-system is not a tracer, a profiler, or a logging framework. It doe
 
 # Our other projects
 
-- [aimap](https://github.com/nuclide-research/aimap) — fingerprint scanner for exposed AI and ML infrastructure
-- [nuclide-atlas](https://github.com/nuclide-research/nuclide-atlas) — see any LLM stack as a graph
-- [safety-stream](https://github.com/nuclide-research/safety-stream) — live SSE view of a model's layered safety reasoning
-- [VisorLog](https://github.com/nuclide-research/visorlog) — finding ledger and ingest pipeline
-- [BARE](https://github.com/nuclide-research/BARE) — semantic exploit-module ranking over scanner findings
+- [aimap](https://github.com/sshpie/aimap) — fingerprint scanner for exposed AI and ML infrastructure
+- [-atlas](https://github.com/sshpie/-atlas) — see any LLM stack as a graph
+- [safety-stream](https://github.com/sshpie/safety-stream) — live SSE view of a model's layered safety reasoning
+- [VisorLog](https://github.com/sshpie/visorlog) — finding ledger and ingest pipeline
+- [BARE](https://github.com/sshpie/BARE) — semantic exploit-module ranking over scanner findings
 
 # License
 
-MIT. Part of the NuClide toolchain. Contact: [nuclide-research.com](https://nuclide-research.com)
+MIT. Part of the  toolchain. Contact: [](https://)

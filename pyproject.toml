@@ -9,7 +9,7 @@ description = "Operational discipline for multi-agent AI: OT-inspired logging, t
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
-authors = [{ name = "Nuclide" }]
+authors = [{ name = "" }]
 keywords = ["agents", "monitoring", "observability", "anomaly-detection", "multi-agent"]
 dependencies = []
 
