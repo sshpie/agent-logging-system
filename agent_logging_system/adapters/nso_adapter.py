@@ -42,16 +42,59 @@ Integration paths:
             body={"sync-from-result": [{"device": "edge-01", "result": True}]},
         )
 
+    4. Log file ingest (from NSO log files — replaces grep triage scripts):
+
+        # Feed raw log content; each error line becomes a failed observation.
+        adapter.ingest_log_file("/var/log/ncs/ncs.log")
+        adapter.ingest_log_file("/var/log/ncs/devel.log")
+        adapter.ingest_log_file("/var/log/ncs/audit.log")
+
+        # Or parse text directly (e.g. ncs --printlog output):
+        adapter.ingest_log_lines(log_text, label="ncserr.log")
+
+        state = monitor.get_system_state()
+        # Repeated failures across scans surface as rolling-window anomalies.
+
 NSO RESTCONF base URL:   https://<host>:8080/restconf
 NSO PyAPI:               import ncs; with ncs.maapi.Maapi() as m: ...
 """
+import re
 import time
 from contextlib import contextmanager
-from typing import Any, Dict, Iterator, Optional
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 from .base_adapter import BaseAdapter
 from agent_logging_system.logging_agent import LoggingAgent
 from agent_logging_system.observation import LATENCY_MACHINE, LATENCY_GENERATION
+
+# Severity pre-filter — mirrors PATTERN in agent-logging-cisco.sh.
+# A line must match this before operation classification runs.
+# This prevents INFO/DEBUG lines with operation keywords from becoming failures.
+_SEVERITY_RE = re.compile(
+    r'\b(error|err|fail|crit|warn|warning|exception|abort|panic|timeout|denied|reject)\b',
+    re.I,
+)
+
+# Operation classification patterns (applied only to lines that pass _SEVERITY_RE).
+# Tuple: (compiled regex, canonical operation, error code label, alert weight)
+# Weight mirrors the shell script scoring: internal=3, callback/sync=2, others=1.
+_LOG_SIGNALS: List[Tuple[re.Pattern, str, str, int]] = [
+    (re.compile(r'CDB boot error|upgrade failed', re.I), "_internal",   "cdb_or_upgrade",   3),
+    (re.compile(r'internal error|panic',          re.I), "_internal",   "internal_error",   3),
+    (re.compile(r'\babort\b',                     re.I), "_internal",   "abort",            3),
+    (re.compile(r'transaction failure',           re.I), "commit",      "transaction_fail", 2),
+    (re.compile(r'out of sync',                   re.I), "check_sync",  "out_of_sync",      2),
+    (re.compile(r'sync.from',                     re.I), "sync_from",   "sync_from_error",  2),
+    (re.compile(r'\bcallback\b',                  re.I), "_callbacks",  "callback_error",   2),
+    (re.compile(r'bad config',                    re.I), "_config",     "bad_config",       1),
+    (re.compile(r'\btemplate\b',                  re.I), "_template",   "template_error",   1),
+    (re.compile(r'\bxpath\b',                     re.I), "_xpath",      "xpath_error",      1),
+    (re.compile(r'\btimeout\b',                   re.I), "_timeout",    "timeout",          1),
+    (re.compile(r'\bdenied\b|\breject\b',         re.I), "_access",     "access_denied",    1),
+]
+
+# Device name patterns in NSO log lines.
+_DEVICE_RE = re.compile(r'\bdevice[= ]+([a-zA-Z0-9_\-\.]+)', re.I)
 
 # Operations treated as long-running/generation — no latency alarms.
 _GENERATION_OPS = {
@@ -299,3 +342,95 @@ class NSOAdapter(BaseAdapter):
             output_data=output or None,
             error_details=error_details,
         )
+
+    def ingest_log_lines(
+        self,
+        text: str,
+        label: str = "",
+    ) -> Dict[str, Any]:
+        """Parse NSO log text and convert signal lines into observations.
+
+        Replaces the pattern-matching in agent-logging-cisco.sh with structured
+        observations that feed into the rolling window and anomaly detector.
+        Each matched line becomes one failed observation. Unmatched lines are
+        ignored — only lines carrying a known failure signal are recorded.
+
+        Signal mapping (mirrors the shell script scoring):
+            internal error / panic / abort / CDB boot / upgrade failed  → HIGH weight (3)
+            transaction failure / out of sync / sync-from error         → MEDIUM weight (2)
+            callback error                                               → MEDIUM weight (2)
+            bad config / template / xpath / timeout / denied            → LOW weight (1)
+
+        Device names are extracted from log lines where present
+        (e.g. "sync-from failed for device edge-router-01") so failures are
+        tracked per device, not just per operation class.
+
+        Args:
+            text:  Raw log content — ncs.log, devel.log, audit.log, ncs-java-vm.log,
+                   ncs-python-vm.log, or ncserr.log output.
+            label: Log file label for agent_id namespacing (e.g. "ncs.log").
+                   Observations are tagged as "nso.<op>[.<device>]".
+
+        Returns the system state snapshot after ingestion.
+        """
+        matched = 0
+        for line in text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+
+            # Severity pre-filter: skip INFO/DEBUG lines even if they mention
+            # operation keywords. Mirrors `grep -inE "$PATTERN"` in the shell script.
+            if not _SEVERITY_RE.search(line):
+                continue
+
+            for pattern, op, code, _weight in _LOG_SIGNALS:
+                if not pattern.search(line):
+                    continue
+
+                # Try to extract a device name from the line.
+                device_match = _DEVICE_RE.search(line)
+                device = device_match.group(1) if device_match else ""
+
+                self.log_operation(
+                    operation=op,
+                    device=device,
+                    status="failed",
+                    latency_ms=0.0,
+                    error_details={
+                        "code": code,
+                        "message": line[:200],   # cap line length in error_details
+                        "source": label or "log",
+                    },
+                )
+                matched += 1
+                break  # one observation per line; first matching signal wins
+
+        return self.get_state()
+
+    def ingest_log_file(
+        self,
+        path: str,
+        label: str = "",
+    ) -> Dict[str, Any]:
+        """Read an NSO log file and pass it through ingest_log_lines().
+
+        Skips silently if the file does not exist (mirrors the shell script's
+        `[ -f "$file" ] || return 0` guard).
+
+        Args:
+            path:  Absolute path to the log file, e.g. "/var/log/ncs/ncs.log".
+            label: Passed to ingest_log_lines() for agent_id namespacing.
+                   Defaults to the filename component of path.
+
+        Returns the system state snapshot after ingestion.
+        """
+        import os
+        if not os.path.isfile(path):
+            return self.get_state()
+
+        file_label = label or os.path.basename(path)
+        with open(path, "r", errors="replace") as fh:
+            text = fh.read()
+
+        return self.ingest_log_lines(text, label=file_label)
