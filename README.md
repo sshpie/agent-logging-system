@@ -1,81 +1,117 @@
 <h1 align="center">agent-logging-system</h1>
 
-<h4 align="center">A monitor that watches your AI agents for slow responses, rising error rates, and empty outputs — and tells you which agent is broken and what to do about it.</h4>
+<div align="center">
+<img src="https://img.shields.io/badge/Python-3.9+-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python 3.9+">
+<img src="https://img.shields.io/badge/dependencies-none-brightgreen?style=flat-square" alt="No dependencies">
+<img src="https://img.shields.io/badge/ingest-O(1)-blue?style=flat-square" alt="O(1) ingest">
+<a href="https://github.com/sshpie/agent-logging-system/actions/workflows/tests.yml"><img src="https://img.shields.io/github/actions/workflow/status/sshpie/agent-logging-system/tests.yml?label=tests&style=flat-square" alt="tests"></a>
+<a href="https://github.com/sshpie/agent-logging-system/blob/main/LICENSE"><img src="https://img.shields.io/github/license/sshpie/agent-logging-system?style=flat-square" alt="MIT"></a>
+<a href="https://github.com/sshpie"><img src="https://img.shields.io/badge/by-sshpie-blue?style=flat-square" alt="sshpie"></a>
+</div>
 
-<p align="center">
-  <a href="https://github.com/sshpie/agent-logging-system/actions/workflows/tests.yml"><img src="https://img.shields.io/github/actions/workflow/status/sshpie/agent-logging-system/tests.yml?label=tests&style=flat-square" alt="tests"></a>
-  <a href="https://github.com/sshpie/agent-logging-system/blob/main/LICENSE"><img src="https://img.shields.io/github/license/sshpie/agent-logging-system?style=flat-square" alt="license"></a>
-  <a href="https://www.python.org"><img src="https://img.shields.io/badge/python-3.9%2B-3776AB?style=flat-square&logo=python" alt="python"></a>
-  <a href="https://github.com/sshpie"><img src="https://img.shields.io/badge/by-sshpie-blue?style=flat-square" alt="sshpie"></a>
-</p>
+<br />
 
-<p align="center">
-  <a href="#features">Features</a> •
-  <a href="#installation">Installation</a> •
-  <a href="#quick-start">Quick Start</a> •
-  <a href="#components">Components</a> •
-  <a href="#default-rules">Rules</a> •
-  <a href="#adapters">Adapters</a> •
-  <a href="#scope">Scope</a>
-</p>
+<div align="center">
+A monitor that watches your AI agents for <strong>slow responses</strong>, <strong>rising error rates</strong>, and <strong>empty outputs</strong> — and tells you which agent is broken and what to do about it.
+</div>
 
 ---
 
-One `Observation` per agent action goes in. A rolling per-agent window tracks the trend. An `AnomalyDetector` trips named alarms when behavior drifts from each agent's own baseline. A `RecommendationEngine` maps each alarm to a concrete action. Stdlib only. No dependencies.
+## Table of Contents
 
-# Features
+1. [Overview](#overview)
+2. [Features](#features)
+3. [Architecture](#architecture)
+4. [Requirements](#requirements)
+5. [Components](#components)
+6. [Observation Schema](#observation-schema)
+7. [Latency Kinds](#latency-kinds)
+8. [Default Rules](#default-rules)
+9. [Adapters](#adapters)
+10. [Quick Start](#quick-start)
+11. [Examples](#examples)
+12. [Scope](#scope)
 
-- Per-action `Observation` schema: timestamp, agent_id, action, input, output, latency_ms, status, confidence, latency_kind
-- Rolling 20-observation window per agent, tracked by `StateModel`
-- Baseline-relative alarms: each agent compared against its own baseline, not a fixed threshold
-- Two latency kinds (`machine`, `generation`) — generation latency never trips the machine alarm
-- Three default rules: `latency_high`, `error_rate_high`, `queue_buildup`
-- `RecommendationEngine` maps every alarm to a named action (`throttle_input`, `investigate_failures`)
-- `BaseAdapter` to wire any host system in; Orchestrator and Warrant adapters included
-- Custom rules via `AnomalyRule(name, check, alert_level, recommendation)`
-- O(1) ingest, incremental scan (~15-27 us for 5 agents)
+---
 
-# Installation
+## Overview
 
-```bash
-pip install agent-logging-system
+agent-logging-system tracks a fleet of AI agents with per-action observations, per-agent rolling windows, baseline-relative alarms, and named recommendations. One `Observation` in, a plain dict out. No database, no collector, no dependencies.
+
+The design maps OT/ICS shift-operations discipline onto AI pipelines: watch the trend, not the snapshot, and catch a degrading agent before it corrupts your output.
+
+---
+
+## Features
+
+- **Per-action `Observation` schema** — timestamp, agent_id, action, input, output, latency_ms, status, confidence, latency_kind
+- **Rolling 20-observation window** per agent, tracked by `StateModel`
+- **Baseline-relative alarms** — each agent compared against its own baseline, not a fixed threshold
+- **Two latency kinds** (`machine`, `generation`) — generation latency never trips the machine alarm, regardless of magnitude
+- **Three default rules** — `latency_high`, `error_rate_high`, `queue_buildup`
+- **Named recommendations** — every alarm maps to a concrete action (`throttle_input`, `investigate_failures`)
+- **`BaseAdapter`** — wire any host system in; Orchestrator and Warrant adapters included
+- **Custom rules** via `AnomalyRule(name, check, alert_level, recommendation)`
+- **O(1) ingest**, incremental scan (~15-27 µs for 5 agents)
+- **Stdlib only** — no database, no file on disk, no external collector
+
+---
+
+## Architecture
+
+```
+Worker agents emit Observation structs
+            │
+            ▼
+  LoggingAgent.ingest()       ← O(1): update StateModel, mark agent dirty
+            │
+            ▼
+       StateModel
+       ├─ rolling window (20 obs/agent)
+       ├─ machine latency series
+       └─ generation latency series
+            │
+            ▼  (on get_system_state())
+     AnomalyDetector          ← evaluates only dirty agents
+     ├─ latency_high
+     ├─ error_rate_high
+     └─ queue_buildup
+            │
+            ▼
+  RecommendationEngine
+            │
+            ▼
+  { agents, anomalies, recommendations }
 ```
 
-Or from source:
+**Adapter layer** — bind any host system into the monitor:
 
-```bash
-git clone https://github.com/sshpie/agent-logging-system
-cd agent-logging-system
-pip install -e .             # editable install
-pip install -e ".[dev]"      # plus test deps
+```
+Host system (orchestrator / coding agent / custom loop)
+            │
+            ▼
+  BaseAdapter.emit_observation()
+            │
+            ▼
+       LoggingAgent
 ```
 
-Python 3.9 or later.
+---
 
-# Quick start
+## Requirements
 
-```python
-from agent_logging_system import LoggingAgent, Observation
+- Python 3.9 or later
+- No external dependencies — stdlib only
 
-logger = LoggingAgent()
+**Optional dev dependencies** (`pip install -e ".[dev]"`):
 
-logger.ingest(Observation(
-    timestamp="2026-06-02T14:32:00Z",
-    agent_id="worker-001",
-    action="api_call",
-    input={"query": "example"},
-    output={"result": "ok"},
-    latency_ms=1200,
-    status="success",
-    confidence=0.95,
-))
+| Package | Purpose |
+|---------|---------|
+| `pytest>=7.0` | Test suite |
 
-state = logger.get_system_state()
-print(state["anomalies"])
-print(state["recommendations"])
-```
+---
 
-# Components
+## Components
 
 | Component | Responsibility |
 |-----------|----------------|
@@ -86,7 +122,9 @@ print(state["recommendations"])
 | `LoggingAgent` | `ingest` + `get_system_state`; incremental scan |
 | `adapters/` | Bind into an orchestrator, coding agent, or custom loop |
 
-# Observation schema
+---
+
+## Observation Schema
 
 ```python
 Observation(
@@ -103,7 +141,9 @@ Observation(
 )
 ```
 
-# Latency kinds
+---
+
+## Latency Kinds
 
 `latency_ms` carries two different quantities, distinguished by `latency_kind`:
 
@@ -124,7 +164,9 @@ Observation(
 )
 ```
 
-# Default rules
+---
+
+## Default Rules
 
 | Rule | Level | Trips when | Recommends |
 |------|-------|-----------|-----------|
@@ -134,43 +176,13 @@ Observation(
 
 `latency_high` is baseline-relative. A steady-slow agent never trips; a 1000ms-to-9000ms spike does.
 
-# `get_system_state` output
+---
 
-```python
-{
-    "agents": {
-        "worker-001": {
-            "agent_id": "worker-001",
-            "status": "in_progress",
-            "avg_latency": 1200.0,
-            "recent_avg_latency": 1200.0,
-            "baseline_latency": 0.0,
-            "machine_recent_avg_latency": 1200.0,
-            "machine_baseline_latency": 0.0,
-            "machine_observations": 1,
-            "generation_observations": 0,
-            "error_count": 0,
-            "error_rate": 0.0,
-            "total_observations": 1,
-            ...
-        }
-    },
-    "anomalies": [
-        {"name": "latency_high", "alert_level": "HIGH",
-         "recommendation": "...", "agent_id": "worker-001"}
-    ],
-    "recommendations": [
-        {"action": "throttle_input", "priority": "HIGH",
-         "reason": "...", "agent_id": "worker-001"}
-    ]
-}
-```
-
-# Adapters
+## Adapters
 
 Subclass `BaseAdapter` to wire a host system into the monitor.
 
-**`OrchestratorAdapter`** for an O->S->H subagent fan-out. Logs per lane (`retrieval.sonnet`, `execution.haiku`) as machine latency. A slow batch trips. The orchestrator's synthesis turn logs as generation latency and never alarms.
+**`OrchestratorAdapter`** — O->S->H subagent fan-out. Logs per lane (`retrieval.sonnet`, `execution.haiku`) as machine latency. A slow batch trips. The orchestrator's synthesis turn logs as generation latency and never alarms.
 
 ```python
 from agent_logging_system import LoggingAgent
@@ -182,9 +194,21 @@ orch.log_synthesis(18000)                                               # genera
 print(orch.get_state()["anomalies"])
 ```
 
-**`WarrantAdapter`** for a book-grounded coding agent. Reasoning and code generation log as generation latency. Citation checks log as machine latency — a slow lookup is a real signal.
+**`WarrantAdapter`** — book-grounded coding agent. Reasoning and code generation log as generation latency. Citation checks log as machine latency — a slow lookup is a real signal.
 
-# Custom rules
+**`AimapAdapter`** — feed a completed aimap JSON report into the monitor. Translates the three aimap phases (port discovery, fingerprint, per-enumerator enum) into observations attributed per enumerator, so per-enumerator error rates are visible.
+
+```python
+from agent_logging_system import LoggingAgent
+from agent_logging_system.adapters.aimap_adapter import AimapAdapter
+
+monitor = LoggingAgent()
+adapter = AimapAdapter(monitor)
+state = adapter.ingest_report("/tmp/aimap-report.json")
+print(state["anomalies"])
+```
+
+**Custom rules:**
 
 ```python
 from agent_logging_system.anomaly_detector import AnomalyRule
@@ -197,24 +221,73 @@ logger.add_anomaly_rule(AnomalyRule(
 ))
 ```
 
-# Performance
+---
 
-`ingest` is O(1). `get_system_state` re-evaluates only agents that changed since the last scan.
+## Quick Start
 
-| Operation | Cost |
-|-----------|------|
-| `ingest` | ~2 us |
-| `get_system_state` | ~15 to 27 us for 5 agents |
-
-# Tests
+### Step 1 — Install
 
 ```bash
-pytest
+pip install agent-logging-system
 ```
 
-Six test files: logging agent, observation schema, anomaly detector, state model, orchestrator adapter, integration.
+Or from source:
 
-# Examples
+```bash
+git clone https://github.com/sshpie/agent-logging-system
+cd agent-logging-system
+pip install -e .
+```
+
+### Step 2 — Instrument an agent
+
+```python
+from agent_logging_system import LoggingAgent, Observation
+
+logger = LoggingAgent()
+
+logger.ingest(Observation(
+    timestamp="2026-06-02T14:32:00Z",
+    agent_id="worker-001",
+    action="api_call",
+    input={"query": "example"},
+    output={"result": "ok"},
+    latency_ms=1200,
+    status="success",
+    confidence=0.95,
+))
+```
+
+### Step 3 — Read the state
+
+```python
+state = logger.get_system_state()
+print(state["anomalies"])
+print(state["recommendations"])
+```
+
+**Output:**
+
+```python
+{
+    "agents": {
+        "worker-001": {
+            "agent_id": "worker-001",
+            "status": "in_progress",
+            "avg_latency": 1200.0,
+            "error_rate": 0.0,
+            "total_observations": 1,
+            ...
+        }
+    },
+    "anomalies": [],
+    "recommendations": []
+}
+```
+
+---
+
+## Examples
 
 ```bash
 python examples/basic_multi_agent.py        # three agents degrading at different rates
@@ -224,15 +297,27 @@ python examples/session_replay.py           # replay a session transcript throug
 python examples/self_monitor.py             # the monitor watching itself, with real perf timings
 ```
 
-# Scope
+Run the test suite:
+
+```bash
+pytest
+```
+
+---
+
+## Scope
 
 Not a tracer, profiler, or logging framework. No stack frames, no output capture, no external collector, no persistent state. Receives `Observation` structs, evaluates rules over rolling per-agent windows, returns a plain dict.
 
-# Other projects
+---
+
+## Other Projects
 
 - [aimap](https://github.com/sshpie/aimap) — fingerprint scanner for exposed AI and ML infrastructure
 - [BARE](https://github.com/sshpie/BARE) — semantic exploit-module ranking over scanner findings
 
-# License
+---
+
+## License
 
 MIT. Part of the sshpie toolchain.
