@@ -42,18 +42,23 @@ Integration paths:
             body={"sync-from-result": [{"device": "edge-01", "result": True}]},
         )
 
-    4. Log file ingest (from NSO log files — replaces grep triage scripts):
+    4. Log file ingest (replaces one-shot grep triage scripts):
 
-        # Feed raw log content; each error line becomes a failed observation.
-        adapter.ingest_log_file("/var/log/ncs/ncs.log")
-        adapter.ingest_log_file("/var/log/ncs/devel.log")
-        adapter.ingest_log_file("/var/log/ncs/audit.log")
+        # Scan last 300 lines of each NSO log file (matches tail -n 300 behavior).
+        for name in ["ncs.log", "devel.log", "audit.log"]:
+            adapter.ingest_log_file(f"/var/log/ncs/{name}", tail_lines=300)
 
-        # Or parse text directly (e.g. ncs --printlog output):
+        # Or parse text directly (e.g. from ncs --printlog output):
         adapter.ingest_log_lines(log_text, label="ncserr.log")
 
         state = monitor.get_system_state()
         # Repeated failures across scans surface as rolling-window anomalies.
+
+    5. Live follow mode (replaces `tail -F | grep`):
+
+        # Blocks; yields a state snapshot each time a new error line appears.
+        for state in adapter.follow_log_file("/var/log/ncs/ncs.log"):
+            notifier.notify_if_anomalies_card(state)
 
 NSO RESTCONF base URL:   https://<host>:8080/restconf
 NSO PyAPI:               import ncs; with ncs.maapi.Maapi() as m: ...
@@ -412,6 +417,7 @@ class NSOAdapter(BaseAdapter):
         self,
         path: str,
         label: str = "",
+        tail_lines: int = 0,
     ) -> Dict[str, Any]:
         """Read an NSO log file and pass it through ingest_log_lines().
 
@@ -419,9 +425,12 @@ class NSOAdapter(BaseAdapter):
         `[ -f "$file" ] || return 0` guard).
 
         Args:
-            path:  Absolute path to the log file, e.g. "/var/log/ncs/ncs.log".
-            label: Passed to ingest_log_lines() for agent_id namespacing.
-                   Defaults to the filename component of path.
+            path:       Absolute path to the log file, e.g. "/var/log/ncs/ncs.log".
+            label:      Passed to ingest_log_lines() for agent_id namespacing.
+                        Defaults to the filename component of path.
+            tail_lines: If > 0, only parse the last N lines of the file —
+                        matches `tail -n N` behavior in the triage scripts.
+                        0 (default) reads the full file.
 
         Returns the system state snapshot after ingestion.
         """
@@ -431,6 +440,63 @@ class NSOAdapter(BaseAdapter):
 
         file_label = label or os.path.basename(path)
         with open(path, "r", errors="replace") as fh:
-            text = fh.read()
+            lines = fh.read().splitlines()
 
-        return self.ingest_log_lines(text, label=file_label)
+        if tail_lines > 0:
+            lines = lines[-tail_lines:]
+
+        return self.ingest_log_lines("\n".join(lines), label=file_label)
+
+    def follow_log_file(
+        self,
+        path: str,
+        label: str = "",
+        poll_interval: float = 1.0,
+    ):
+        """Generator: watch an NSO log file for new error lines in real-time.
+
+        Mirrors `tail -n 0 -F <file> | grep -inE "$PATTERN"` from the follow
+        mode in the triage script. Seeks to the end of the file on startup so
+        only new lines (written after this call) are processed.
+
+        Yields a system state snapshot each time a new matching line appears.
+        Does not yield on quiet intervals — only on new signal.
+
+        Usage:
+
+            adapter = NSOAdapter(monitor)
+            for state in adapter.follow_log_file("/var/log/ncs/ncs.log"):
+                notifier.notify_if_anomalies_card(state)
+
+        Args:
+            path:          Path to the NSO log file to watch.
+            label:         Passed through to ingest_log_lines() for namespacing.
+            poll_interval: Seconds to sleep between read attempts when no new
+                           data is available. Default: 1.0.
+
+        Raises:
+            FileNotFoundError: if the file does not exist at call time.
+        """
+        import os
+        file_label = label or os.path.basename(path)
+
+        with open(path, "r", errors="replace") as fh:
+            fh.seek(0, 2)   # jump to end — only tail new content
+
+            while True:
+                line = fh.readline()
+                if not line:
+                    time.sleep(poll_interval)
+                    continue
+
+                line = line.rstrip()
+                if not line:
+                    continue
+
+                # Only emit when the line carries a severity signal.
+                if not _SEVERITY_RE.search(line):
+                    continue
+
+                # Classify and emit — reuse ingest_log_lines on one line at a time.
+                state = self.ingest_log_lines(line, label=file_label)
+                yield state
