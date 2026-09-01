@@ -1,12 +1,12 @@
 <h1 align="center">agent-logging-system</h1>
 
-<h4 align="center">Operational monitor for multi-agent AI. Per-action observations, per-agent trends, baseline-relative alarms, named recommendations.</h4>
+<h4 align="center">A monitor that watches your AI agents for slow responses, rising error rates, and empty outputs — and tells you which agent is broken and what to do about it.</h4>
 
 <p align="center">
-  <a href="https://github.com/sshpie/agent-logging-system/actions/workflows/tests.yml"><img src="https://img.shields.io/github/actions/workflow/status//agent-logging-system/tests.yml?label=tests&style=flat-square" alt="tests"></a>
-  <a href="https://github.com/sshpie/agent-logging-system/blob/main/LICENSE"><img src="https://img.shields.io/github/license//agent-logging-system?style=flat-square" alt="license"></a>
+  <a href="https://github.com/sshpie/agent-logging-system/actions/workflows/tests.yml"><img src="https://img.shields.io/github/actions/workflow/status/sshpie/agent-logging-system/tests.yml?label=tests&style=flat-square" alt="tests"></a>
+  <a href="https://github.com/sshpie/agent-logging-system/blob/main/LICENSE"><img src="https://img.shields.io/github/license/sshpie/agent-logging-system?style=flat-square" alt="license"></a>
   <a href="https://www.python.org"><img src="https://img.shields.io/badge/python-3.9%2B-3776AB?style=flat-square&logo=python" alt="python"></a>
-  <a href="https://"><img src="https://img.shields.io/badge/by--blue?style=flat-square" alt=""></a>
+  <a href="https://github.com/sshpie"><img src="https://img.shields.io/badge/by-sshpie-blue?style=flat-square" alt="sshpie"></a>
 </p>
 
 <p align="center">
@@ -241,4 +241,4 @@ agent-logging-system is not a tracer, a profiler, or a logging framework. It doe
 
 # License
 
-MIT. Part of the  toolchain. Contact: [](https://)
+MIT. Part of the sshpie toolchain.

@@ -88,8 +88,9 @@ class AimapAdapter(BaseAdapter):
 
         timestamp = report.get("timestamp") or _utc_now()
         summary = report.get("summary", {})
-        services = report.get("services", [])
-        enum_results = report.get("enum_results", [])
+        # aimap emits null (not []) for empty arrays — coalesce so len() works.
+        services = report.get("services") or []
+        enum_results = report.get("enum_results") or []
 
         # Derive per-service latency estimate from total scan duration.
         duration_ms = _parse_duration_ms(summary.get("scan_duration", ""))
@@ -97,7 +98,7 @@ class AimapAdapter(BaseAdapter):
         latency_per_service = (duration_ms / total_services) if duration_ms else 1000.0
 
         # Phase 1: one observation per open port.
-        open_ports = report.get("open_ports", [])
+        open_ports = report.get("open_ports") or []
         for port_entry in open_ports:
             host = port_entry.get("host", "unknown") if isinstance(port_entry, dict) else str(port_entry)
             port = port_entry.get("port", 0) if isinstance(port_entry, dict) else 0

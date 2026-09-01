@@ -5,11 +5,11 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "agent-logging-system"
 version = "0.4.0"
-description = "Operational discipline for multi-agent AI: OT-inspired logging, trend analysis, and anomaly detection for worker agents."
+description = "A monitor that watches your AI agents for slow responses, rising error rates, and empty outputs — and tells you which agent is broken and what to do about it."
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
-authors = [{ name = "" }]
+authors = [{ name = "sshpie" }]
 keywords = ["agents", "monitoring", "observability", "anomaly-detection", "multi-agent"]
 dependencies = []
 

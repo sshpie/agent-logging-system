@@ -24,3 +24,7 @@ venv/
 .idea/
 .vscode/
 .DS_Store
+
+# Local data / recon artifacts
+*.db
+[0-9]*_[0-9]*/
