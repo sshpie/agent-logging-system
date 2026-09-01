@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
 authors = [{ name = "sshpie" }]
-keywords = ["agents", "monitoring", "observability", "anomaly-detection", "multi-agent"]
+keywords = ["agents", "monitoring", "observability", "anomaly-detection", "multi-agent", "cisco", "mcp", "network-monitoring", "cisco-devnet"]
 dependencies = []
 
 [project.optional-dependencies]

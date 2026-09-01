@@ -208,6 +208,42 @@ state = adapter.ingest_report("/tmp/aimap-report.json")
 print(state["anomalies"])
 ```
 
+**`CiscoMCPAdapter`** — monitor a fleet of Cisco MCP server tool calls (ThousandEyes, Webex, Catalyst Center, Nexus Dashboard, Catalyst SD-WAN, IOS-XE). Each tool call is attributed to `<product>.<tool_name>`, giving per-tool error rates and per-product latency trends in a single monitor.
+
+```python
+from agent_logging_system import LoggingAgent
+from agent_logging_system.adapters.cisco_mcp_adapter import CiscoMCPAdapter
+
+monitor = LoggingAgent()
+adapter = CiscoMCPAdapter(monitor)
+
+adapter.log_tool_call(
+    tool_name="get_alerts",
+    latency_ms=340,
+    status="success",
+    product=CiscoMCPAdapter.THOUSANDEYES,
+    input_data={"agent_id": "1234"},
+    output_data={"alerts": []},
+)
+
+print(adapter.get_state()["anomalies"])
+```
+
+Batch ingest from an MCP session log:
+
+```python
+adapter.ingest_session_log({
+    "tool_calls": [
+        {"tool": "get_tests",   "product": "thousandeyes",   "latency_ms": 280, "status": "success"},
+        {"tool": "list_rooms",  "product": "webex",          "latency_ms": 150, "status": "success"},
+        {"tool": "get_devices", "product": "catalyst_center","latency_ms": 900, "status": "failed",
+         "error": "timeout"},
+    ]
+})
+```
+
+Products: `THOUSANDEYES`, `WEBEX`, `CATALYST_CENTER`, `NEXUS_DASHBOARD`, `CATALYST_SDWAN`, `IOS_XE`.
+
 **Custom rules:**
 
 ```python
