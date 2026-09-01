@@ -47,53 +47,57 @@ The design maps OT/ICS shift-operations discipline onto AI pipelines: watch the 
 - **Per-action `Observation` schema** — timestamp, agent_id, action, input, output, latency_ms, status, confidence, latency_kind
 - **Rolling 20-observation window** per agent, tracked by `StateModel`
 - **Baseline-relative alarms** — each agent compared against its own baseline, not a fixed threshold
-- **Two latency kinds** (`machine`, `generation`) — generation latency never trips the machine alarm, regardless of magnitude
+- **Two latency kinds** (`machine`, `generation`) — generation latency never trips the machine alarm
 - **Three default rules** — `latency_high`, `error_rate_high`, `queue_buildup`
-- **Named recommendations** — every alarm maps to a concrete action (`throttle_input`, `investigate_failures`)
-- **`BaseAdapter`** — wire any host system in; Orchestrator and Warrant adapters included
+- **Named recommendations** — every alarm maps to a concrete action
 - **Custom rules** via `AnomalyRule(name, check, alert_level, recommendation)`
 - **O(1) ingest**, incremental scan (~15-27 µs for 5 agents)
 - **Stdlib only** — no database, no file on disk, no external collector
+- **Cisco MCP adapter** — per-tool rolling windows across ThousandEyes, Webex, Catalyst Center, Nexus Dashboard, SD-WAN, IOS XE, Meraki, NSO
+- **Meraki rate limit tracking** — `X-RateLimit-Remaining` parsed per call; MEDIUM at 20%, HIGH on 429
+- **NSO log ingestion** — parse `ncs.log`, `devel.log`, `audit.log`, `ncserr.log.*` into observations; supports `tail_lines` and live `follow_log_file()` mode
+- **Webex alerting** — Adaptive Cards with severity color-coding via bot token; stdlib only
 
 ---
 
 ## Architecture
 
 ```
-Worker agents emit Observation structs
-            │
-            ▼
-  LoggingAgent.ingest()       ← O(1): update StateModel, mark agent dirty
-            │
-            ▼
-       StateModel
-       ├─ rolling window (20 obs/agent)
-       ├─ machine latency series
-       └─ generation latency series
-            │
-            ▼  (on get_system_state())
-     AnomalyDetector          ← evaluates only dirty agents
-     ├─ latency_high
-     ├─ error_rate_high
-     └─ queue_buildup
-            │
-            ▼
-  RecommendationEngine
-            │
-            ▼
-  { agents, anomalies, recommendations }
-```
-
-**Adapter layer** — bind any host system into the monitor:
-
-```
-Host system (orchestrator / coding agent / custom loop)
-            │
-            ▼
-  BaseAdapter.emit_observation()
-            │
-            ▼
-       LoggingAgent
+Cisco AI agent pipeline
+        │
+        ├─ MCP tool calls ──────────────► CiscoMCPAdapter / WebexMessagingMCPAdapter
+        │                                   <product>.<tool_name> rolling windows
+        │                                   wrap_agent() auto-intercepts sessions
+        │
+        ├─ Meraki Dashboard API ────────► MerakiAdapter
+        │                                   X-RateLimit-Remaining per call
+        │                                   MEDIUM at 20% budget / HIGH on 429
+        │
+        ├─ NSO RESTCONF / PyAPI ────────► NSOAdapter
+        │                                   operation-class latency (sync=generation)
+        │                                   ingest_log_file() / follow_log_file()
+        │
+        └─ Any agent framework ─────────► BaseAdapter (subclass)
+                                            emit_observation()
+                                                    │
+                                                    ▼
+                                     LoggingAgent.ingest()       ← O(1)
+                                                    │
+                                                    ▼
+                                              StateModel
+                                        rolling window (20 obs/agent)
+                                        machine vs generation latency
+                                                    │
+                                              AnomalyDetector
+                                        latency_high / error_rate_high
+                                        queue_buildup / custom rules
+                                                    │
+                                         RecommendationEngine
+                                                    │
+                                     ┌──────────────┴──────────────┐
+                                     ▼                             ▼
+                             { agents, anomalies,        WebexNotifier
+                               recommendations }         Adaptive Card alert
 ```
 
 ---
@@ -115,12 +119,13 @@ Host system (orchestrator / coding agent / custom loop)
 
 | Component | Responsibility |
 |-----------|----------------|
-| `Observation` | Structured unit a worker emits: timestamp, agent_id, action, input, output, latency_ms, status, confidence, latency_kind |
-| `StateModel` | Rolling window (20 obs), trends, error rate, machine vs generation latency counts |
+| `Observation` | Structured unit: timestamp, agent_id, action, input, output, latency_ms, status, confidence, latency_kind |
+| `StateModel` | Rolling window (20 obs), error rate, machine vs generation latency counts |
 | `AnomalyDetector` | Evaluates threshold rules over state snapshots |
 | `RecommendationEngine` | Maps alarm name to concrete action |
 | `LoggingAgent` | `ingest` + `get_system_state`; incremental scan |
-| `adapters/` | Bind into an orchestrator, coding agent, or custom loop |
+| `adapters/` | Bind into any host system; Cisco-specific adapters included |
+| `alerting/` | `WebexNotifier` — plain text, Markdown, and Adaptive Card alerts |
 
 ---
 
@@ -150,9 +155,9 @@ Observation(
 | kind | what it is | high means | feeds `latency_high` alarm? |
 |------|-----------|-----------|---------------------------|
 | `"machine"` (default) | execution time of a call | pathological, contended | yes |
-| `"generation"` | wall-clock of producing a large output | expected | no |
+| `"generation"` | wall-clock of a long-running output | expected | no |
 
-A duration tagged `generation` can never trip the machine alarm. `"machine"` is the default — an unclassified duration is treated as alarmable.
+A duration tagged `generation` can never trip the machine alarm. `"machine"` is the default.
 
 ```python
 from agent_logging_system import Observation, LATENCY_GENERATION
@@ -170,9 +175,9 @@ Observation(
 
 | Rule | Level | Trips when | Recommends |
 |------|-------|-----------|-----------|
-| `latency_high` | HIGH | machine-kind recent avg exceeds agent's own baseline by 3x, above a 100ms floor, after 4-sample warmup | `throttle_input` |
+| `latency_high` | HIGH | machine-kind recent avg exceeds agent's own baseline by 3x, above 100ms floor, after 4-sample warmup | `throttle_input` |
 | `error_rate_high` | MEDIUM | error rate over 10% | `investigate_failures` |
-| `queue_buildup` | LOW | over 10 observations and error rate under 5% | signal only |
+| `queue_buildup` | LOW | over 10 observations, error rate under 5% | signal only |
 
 `latency_high` is baseline-relative. A steady-slow agent never trips; a 1000ms-to-9000ms spike does.
 
@@ -180,33 +185,34 @@ Observation(
 
 ## Adapters
 
-Subclass `BaseAdapter` to wire a host system into the monitor.
+Subclass `BaseAdapter` to wire any host system into the monitor.
 
-**`OrchestratorAdapter`** — O->S->H subagent fan-out. Logs per lane (`retrieval.sonnet`, `execution.haiku`) as machine latency. A slow batch trips. The orchestrator's synthesis turn logs as generation latency and never alarms.
+**`OrchestratorAdapter`** — O->S->H subagent fan-out. Each lane logged as machine latency. Synthesis turn logged as generation latency and never alarms.
 
 ```python
-from agent_logging_system import LoggingAgent
 from agent_logging_system.adapters import OrchestratorAdapter
 
 orch = OrchestratorAdapter(LoggingAgent())
-orch.log_fanout(orch.EXECUTION, [("shard 1", 480), ("shard 2", 9000)])  # machine, per lane
-orch.log_synthesis(18000)                                               # generation, never alarms
-print(orch.get_state()["anomalies"])
+orch.log_fanout(orch.EXECUTION, [("shard 1", 480), ("shard 2", 9000)])
+orch.log_synthesis(18000)   # generation, never alarms
 ```
 
-**`WarrantAdapter`** — coding agent. Reasoning and code generation log as generation latency. Citation checks log as machine latency — a slow lookup is a real signal.
+**`WarrantAdapter`** — coding agent. Reasoning and generation log as generation latency. Citation checks log as machine latency.
 
-**`AimapAdapter`** — feed a completed aimap JSON report into the monitor. Translates the three aimap phases (port discovery, fingerprint, per-enumerator enum) into observations per enumerator.
+**`AimapAdapter`** — feed a completed aimap JSON report into the monitor. Per-enumerator observations; enumerator error rates surface as anomalies.
 
 ```python
-from agent_logging_system.adapters.aimap_adapter import AimapAdapter
+from agent_logging_system.adapters import AimapAdapter
 
 adapter = AimapAdapter(LoggingAgent())
 state = adapter.ingest_report("/tmp/aimap-report.json")
-print(state["anomalies"])
 ```
 
-**`CiscoMCPAdapter`** — monitor Cisco MCP server tool calls. Each tool tracked independently as `<product>.<tool_name>`. Supports three integration paths:
+---
+
+### Cisco Adapters
+
+**`CiscoMCPAdapter`** — monitor Cisco MCP server tool calls. Each tool tracked as `<product>.<tool_name>`. Three integration paths:
 
 ```python
 from agent_logging_system.adapters import CiscoMCPAdapter
@@ -225,76 +231,94 @@ adapter.ingest_mcp_trace(trace_messages, product=CiscoMCPAdapter.THOUSANDEYES)
 
 Products: `THOUSANDEYES`, `WEBEX`, `WEBEX_MESSAGING`, `CATALYST_CENTER`, `NEXUS_DASHBOARD`, `CATALYST_SDWAN`, `IOS_XE`, `MERAKI`, `NSO`.
 
-**`WebexMessagingMCPAdapter`** — pre-configured for the [Webex Messaging MCP Server](https://mcp.webexapis.com/mcp/webex-messaging). Knows all 24 tools (`webex-create-message`, `webex-list-spaces`, etc.) and classifies read/write/stream automatically.
+---
+
+**`WebexMessagingMCPAdapter`** — pre-configured for the Webex Messaging MCP Server. All 24 tools pre-classified as read, write, or stream. Wrap an MCP session once and every call is automatically observed.
 
 ```python
 from agent_logging_system.adapters import WebexMessagingMCPAdapter
 
 adapter = WebexMessagingMCPAdapter(LoggingAgent())
-session = adapter.wrap_agent(mcp_client_session)   # auto-intercepts every tool call
+session = adapter.wrap_agent(mcp_client_session)
 await session.async_call_tool("webex-create-message", {"roomId": "...", "text": "Hello"})
 ```
 
-**`MerakiAdapter`** — monitor Cisco Meraki Dashboard API calls. Tracks `X-RateLimit-Remaining` and fires a `MEDIUM` anomaly at 20% remaining, `HIGH` on 429. Accepts the `observe()` context manager, `log_api_call()`, or raw response headers via `ingest_response_headers()`.
+---
+
+**`MerakiAdapter`** — monitor Cisco Meraki Dashboard API calls. Tracks `X-RateLimit-Remaining` on every call. MEDIUM anomaly at 20% remaining; HIGH on 429 — before the next call goes out.
 
 ```python
 from agent_logging_system.adapters import MerakiAdapter
 
 adapter = MerakiAdapter(LoggingAgent(), organization_id="org-L_123456")
 
+# Context manager: auto-times, handles exceptions.
 with adapter.observe("networks.getNetworkDevices") as obs:
     result = dashboard.networks.getNetworkDevices(networkId=net_id)
     obs.rate_limit_remaining = int(resp.headers["X-RateLimit-Remaining"])
     obs.result_count = len(result)
+
+# Manual: log after any HTTP client call.
+adapter.log_api_call("devices.getDevice", status_code=200, latency_ms=110, rate_limit_remaining=2)
+
+# Header ingest: extract rate limit data from raw response headers.
+adapter.ingest_response_headers("networks.getNetworkDevices", 200, 134.0, resp.headers)
 ```
 
-**`NSOAdapter`** — monitor Cisco NSO RESTCONF/NETCONF/PyAPI operations. Operation-aware: `sync-from` and `sync-all` use generation latency (no latency alarm). `commit` and `check-sync` use machine latency — a slow commit is a real signal.
+---
+
+**`NSOAdapter`** — monitor Cisco NSO RESTCONF/NETCONF/PyAPI operations and log files. Operation-class aware: `sync-from`, `sync-all`, `re-deploy-all` use generation latency (no alarm). `commit` and `check-sync` use machine latency.
 
 ```python
 from agent_logging_system.adapters import NSOAdapter
 
 adapter = NSOAdapter(LoggingAgent(), nso_host="nso.corp.example.com")
 
+# 1. Context manager:
 with adapter.observe("sync_from", device="edge-router-01") as obs:
     result = maapi_session.sync_from("edge-router-01")
 
+# 2. Manual log:
+adapter.log_operation("check_sync", device="edge-router-01", status="success", latency_ms=95)
 adapter.log_commit(dry_run=True, latency_ms=155.0, changeset_size=12)
+
+# 3. RESTCONF response:
 adapter.ingest_restconf_response("/restconf/operations/tailf-ncs:sync-from", "POST", 200, 5200.0)
+
+# 4. Log file ingest — replaces grep triage scripts:
+for name in ["ncs.log", "devel.log", "audit.log", "ncs-java-vm.log", "ncs-python-vm.log"]:
+    adapter.ingest_log_file(f"/var/log/ncs/{name}", tail_lines=300)
+
+# 5. Live follow — replaces `tail -F | grep`, yields on every new error line:
+for state in adapter.follow_log_file("/var/log/ncs/ncs.log"):
+    notifier.notify_if_anomalies_card(state)
 ```
 
-**`WebexNotifier`** — forward anomalies to a Webex room. Supports plain text, Markdown, and Adaptive Cards.
+Log ingestion maps the standard NSO error signal patterns to per-device observations. A device that fails across multiple scan runs surfaces as a named anomaly with a recommendation. A single transient error drops off naturally as the window rolls forward.
+
+---
+
+**`WebexNotifier`** — forward anomalies to a Webex room via bot token. Stdlib only.
 
 ```python
 from agent_logging_system.alerting import WebexNotifier
 
 notifier = WebexNotifier(bot_token="...", room_id="...", min_level="HIGH")
-notifier.notify_if_anomalies(state)         # plain text
-notifier.notify_if_anomalies_card(state)    # Adaptive Card with severity color-coding
+
+notifier.notify_if_anomalies(state)       # plain text
+notifier.notify_if_anomalies_card(state)  # Adaptive Card: severity color, anomaly table, recommendations
 ```
 
-**MCP server mode** — expose the monitor as an MCP server so any Claude/Webex/ThousandEyes AI agent can query it directly:
+Setup: create a bot at `developer.webex.com/my-apps/new/bot`, add it to a room, pass the token and room ID.
 
-```bash
-python -m agent_logging_system.mcp_server --host 0.0.0.0 --port 8421 --api-key your-key
-```
-
-Or embedded:
-
-```python
-from agent_logging_system.mcp_server import ALSMCPServer
-
-server = ALSMCPServer(monitor, host="0.0.0.0", port=8421, api_key="your-key")
-server.start_background()   # daemon thread
-```
-
-Tools exposed: `als-get-fleet-state`, `als-get-anomalies`, `als-check-agent`, `als-get-recommendations`.
+---
 
 **Custom rules:**
 
 ```python
 from agent_logging_system.anomaly_detector import AnomalyRule
 
-logger.add_anomaly_rule(AnomalyRule(
+monitor.add_anomaly_rule(AnomalyRule(
     name="confidence_collapse",
     check=lambda s: s.get("error_rate", 0) > 0.25,
     alert_level="HIGH",
@@ -325,9 +349,9 @@ pip install -e .
 ```python
 from agent_logging_system import LoggingAgent, Observation
 
-logger = LoggingAgent()
+monitor = LoggingAgent()
 
-logger.ingest(Observation(
+monitor.ingest(Observation(
     timestamp="2026-06-02T14:32:00Z",
     agent_id="worker-001",
     action="api_call",
@@ -342,7 +366,7 @@ logger.ingest(Observation(
 ### Step 3 — Read the state
 
 ```python
-state = logger.get_system_state()
+state = monitor.get_system_state()
 print(state["anomalies"])
 print(state["recommendations"])
 ```
@@ -354,7 +378,6 @@ print(state["recommendations"])
     "agents": {
         "worker-001": {
             "agent_id": "worker-001",
-            "status": "in_progress",
             "avg_latency": 1200.0,
             "error_rate": 0.0,
             "total_observations": 1,
@@ -373,12 +396,12 @@ print(state["recommendations"])
 ```bash
 python examples/basic_multi_agent.py        # three agents degrading at different rates
 python examples/warrant_integration.py      # Warrant adapter: reasoning, code, citation logs
-python examples/orchestrator_integration.py # O->S->H fan-out: slow lane alarms, long synthesis does not
+python examples/orchestrator_integration.py # O->S->H fan-out: slow lane alarms, synthesis does not
 python examples/session_replay.py           # replay a session transcript through the monitor
 python examples/self_monitor.py             # the monitor watching itself, with real perf timings
 python examples/cisco_thousandeyes.py       # ThousandEyes MCP: wrap_agent, manual log, trace ingest
 python examples/cisco_meraki.py             # Meraki Dashboard API: rate limit tracking, 429 anomaly
-python examples/cisco_nso.py               # NSO RESTCONF/PyAPI: sync-from, commit, service deploy
+python examples/cisco_nso.py               # NSO RESTCONF/PyAPI/log: sync-from, commit, log ingestion
 ```
 
 Run the test suite:
