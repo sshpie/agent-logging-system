@@ -21,22 +21,19 @@
 
 ---
 
-agent-logging-system watches a fleet of AI agents the way an industrial control room watches a plant. One `Observation` per action goes in. A rolling per-agent window tracks the trend. An `AnomalyDetector` trips named alarms when behavior drifts from each agent's own baseline. A `RecommendationEngine` maps each alarm to a concrete action.
-
-The design is borrowed from OT. AVEVA PI holds every sensor reading. WinCC raises an alarm when a value drifts. IBM Maximo maps that alarm to a maintenance procedure. An operator reads the trend, not the snapshot, and catches a failing pump bearing weeks before it seizes. This tool maps that discipline onto AI agents. Standard library only. No runtime dependencies.
+One `Observation` per agent action goes in. A rolling per-agent window tracks the trend. An `AnomalyDetector` trips named alarms when behavior drifts from each agent's own baseline. A `RecommendationEngine` maps each alarm to a concrete action. Stdlib only. No dependencies.
 
 # Features
 
 - Per-action `Observation` schema: timestamp, agent_id, action, input, output, latency_ms, status, confidence, latency_kind
 - Rolling 20-observation window per agent, tracked by `StateModel`
-- Baseline-relative alarms: each agent is compared against its own normal, not a fixed line
-- Two latency kinds (`machine`, `generation`). A long generation never trips the machine alarm at any magnitude
+- Baseline-relative alarms: each agent compared against its own baseline, not a fixed threshold
+- Two latency kinds (`machine`, `generation`) — generation latency never trips the machine alarm
 - Three default rules: `latency_high`, `error_rate_high`, `queue_buildup`
-- `RecommendationEngine` maps every alarm to a named fix (`throttle_input`, `investigate_failures`)
-- `BaseAdapter` to wire any host system in. Orchestrator and Warrant adapters ship
+- `RecommendationEngine` maps every alarm to a named action (`throttle_input`, `investigate_failures`)
+- `BaseAdapter` to wire any host system in; Orchestrator and Warrant adapters included
 - Custom rules via `AnomalyRule(name, check, alert_level, recommendation)`
 - O(1) ingest, incremental scan (~15-27 us for 5 agents)
-- Stdlib only. No database, no file on disk, no external collector
 
 # Installation
 
@@ -80,14 +77,14 @@ print(state["recommendations"])
 
 # Components
 
-| Component | OT analogue | Responsibility |
-|-----------|-------------|----------------|
-| `Observation` | one sensor reading | structured unit a worker emits: timestamp, agent_id, action, input, output, latency_ms, status, confidence, latency_kind |
-| `StateModel` | historian + operator model | rolling window (20 obs), trends, error rate, machine vs generation latency counts |
-| `AnomalyDetector` | WinCC alarm engine | evaluates threshold rules over state snapshot |
-| `RecommendationEngine` | operator response procedure | maps alarm name to concrete action |
-| `LoggingAgent` | control-room console | `ingest` + `get_system_state`; incremental scan |
-| `adapters/` | wiring to the plant | bind into an orchestrator, coding agent, or custom loop |
+| Component | Responsibility |
+|-----------|----------------|
+| `Observation` | Structured unit a worker emits: timestamp, agent_id, action, input, output, latency_ms, status, confidence, latency_kind |
+| `StateModel` | Rolling window (20 obs), trends, error rate, machine vs generation latency counts |
+| `AnomalyDetector` | Evaluates threshold rules over state snapshots |
+| `RecommendationEngine` | Maps alarm name to concrete action |
+| `LoggingAgent` | `ingest` + `get_system_state`; incremental scan |
+| `adapters/` | Bind into an orchestrator, coding agent, or custom loop |
 
 # Observation schema
 
@@ -113,9 +110,9 @@ Observation(
 | kind | what it is | high means | feeds `latency_high` alarm? |
 |------|-----------|-----------|---------------------------|
 | `"machine"` (default) | execution time of a call | pathological, contended | yes |
-| `"generation"` | wall-clock of producing a large output | usually expected | no, ever |
+| `"generation"` | wall-clock of producing a large output | expected | no |
 
-A 9-second API call that should take 1 second and a 9-second explanation meant to be long are not the same event. A duration tagged `generation` can never trip the machine alarm. `"machine"` is the default: an unclassified duration is treated as alarmable.
+A duration tagged `generation` can never trip the machine alarm. `"machine"` is the default — an unclassified duration is treated as alarmable.
 
 ```python
 from agent_logging_system import Observation, LATENCY_GENERATION
@@ -135,7 +132,7 @@ Observation(
 | `error_rate_high` | MEDIUM | error rate over 10% | `investigate_failures` |
 | `queue_buildup` | LOW | over 10 observations and error rate under 5% | signal only |
 
-`latency_high` is baseline-relative. A steady-but-slow agent does not cry wolf. A 1000ms-to-9000ms jump still trips.
+`latency_high` is baseline-relative. A steady-slow agent never trips; a 1000ms-to-9000ms spike does.
 
 # `get_system_state` output
 
@@ -171,9 +168,9 @@ Observation(
 
 # Adapters
 
-Subclass `BaseAdapter` to wire a host system into the monitor. Two ship.
+Subclass `BaseAdapter` to wire a host system into the monitor.
 
-**`OrchestratorAdapter`** for an O->S->H subagent fan-out. Dispatches log per lane (`retrieval.sonnet`, `execution.haiku`) as machine latency. A lane builds a baseline and a slow batch trips. The orchestrator's synthesis turn logs as generation latency. A long integration never alarms.
+**`OrchestratorAdapter`** for an O->S->H subagent fan-out. Logs per lane (`retrieval.sonnet`, `execution.haiku`) as machine latency. A slow batch trips. The orchestrator's synthesis turn logs as generation latency and never alarms.
 
 ```python
 from agent_logging_system import LoggingAgent
@@ -185,7 +182,7 @@ orch.log_synthesis(18000)                                               # genera
 print(orch.get_state()["anomalies"])
 ```
 
-**`WarrantAdapter`** for a book-grounded coding agent. Reasoning and code generation log as generation latency. Citation checks log as machine latency: a slow citation lookup is a real signal.
+**`WarrantAdapter`** for a book-grounded coding agent. Reasoning and code generation log as generation latency. Citation checks log as machine latency — a slow lookup is a real signal.
 
 # Custom rules
 
@@ -215,7 +212,7 @@ logger.add_anomaly_rule(AnomalyRule(
 pytest
 ```
 
-Seven test files cover the logging agent, observation schema, anomaly detector, state model, and orchestrator adapter.
+Six test files: logging agent, observation schema, anomaly detector, state model, orchestrator adapter, integration.
 
 # Examples
 
@@ -229,14 +226,11 @@ python examples/self_monitor.py             # the monitor watching itself, with 
 
 # Scope
 
-agent-logging-system is not a tracer, a profiler, or a logging framework. It does not capture stack frames, record every line of output, or send data to an external collector. It holds no persistent state: no database, no file on disk. It receives `Observation` structs your code constructs, evaluates rules over rolling per-agent windows, and returns a plain dict. It stops there.
+Not a tracer, profiler, or logging framework. No stack frames, no output capture, no external collector, no persistent state. Receives `Observation` structs, evaluates rules over rolling per-agent windows, returns a plain dict.
 
-# Our other projects
+# Other projects
 
 - [aimap](https://github.com/sshpie/aimap) — fingerprint scanner for exposed AI and ML infrastructure
-- [-atlas](https://github.com/sshpie/-atlas) — see any LLM stack as a graph
-- [safety-stream](https://github.com/sshpie/safety-stream) — live SSE view of a model's layered safety reasoning
-- [VisorLog](https://github.com/sshpie/visorlog) — finding ledger and ingest pipeline
 - [BARE](https://github.com/sshpie/BARE) — semantic exploit-module ranking over scanner findings
 
 # License
