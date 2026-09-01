@@ -117,9 +117,56 @@ class TestLogToolCall:
             is not state["agents"]["webex.get_alerts"]
         )
 
-    def test_wrap_agent_is_passthrough(self, adapter):
-        sentinel = object()
-        assert adapter.wrap_agent(sentinel) is sentinel
+    def test_wrap_agent_requires_product(self, monitor):
+        adapter = CiscoMCPAdapter(monitor)  # no product set
+        with pytest.raises(ValueError, match="product"):
+            adapter.wrap_agent(object())
+
+    def test_wrap_agent_intercepts_sync_call_tool(self, monitor):
+        class FakeMCPSession:
+            def call_tool(self, name, arguments=None):
+                return type("R", (), {"isError": False, "content": []})()
+
+        adapter = CiscoMCPAdapter(monitor, product=CiscoMCPAdapter.THOUSANDEYES)
+        wrapped = adapter.wrap_agent(FakeMCPSession())
+        wrapped.call_tool("get_test_results", {"test_id": "1"})
+
+        state = monitor.get_system_state()
+        assert "thousandeyes.get_test_results" in state["agents"]
+
+    def test_wrap_agent_error_result_counts_as_failed(self, monitor):
+        class FakeMCPSession:
+            def call_tool(self, name, arguments=None):
+                return type("R", (), {"isError": True, "content": []})()
+
+        adapter = CiscoMCPAdapter(monitor, product=CiscoMCPAdapter.WEBEX)
+        wrapped = adapter.wrap_agent(FakeMCPSession())
+        wrapped.call_tool("send_message", {})
+
+        state = monitor.get_system_state()
+        assert state["agents"]["webex.send_message"]["error_rate"] > 0
+
+    def test_wrap_agent_exception_counts_as_failed(self, monitor):
+        class FakeMCPSession:
+            def call_tool(self, name, arguments=None):
+                raise ConnectionError("timeout")
+
+        adapter = CiscoMCPAdapter(monitor, product=CiscoMCPAdapter.CATALYST_CENTER)
+        wrapped = adapter.wrap_agent(FakeMCPSession())
+        with pytest.raises(ConnectionError):
+            wrapped.call_tool("get_devices", {})
+
+        state = monitor.get_system_state()
+        assert state["agents"]["catalyst_center.get_devices"]["error_rate"] > 0
+
+    def test_wrap_agent_passthrough_non_call_tool_attrs(self, monitor):
+        class FakeMCPSession:
+            server_name = "thousandeyes-mcp"
+            def call_tool(self, *a, **kw): ...
+
+        adapter = CiscoMCPAdapter(monitor, product=CiscoMCPAdapter.THOUSANDEYES)
+        wrapped = adapter.wrap_agent(FakeMCPSession())
+        assert wrapped.server_name == "thousandeyes-mcp"
 
 
 class TestIngestSessionLog:
@@ -202,3 +249,56 @@ class TestIngestSessionLog:
         state = adapter.ingest_session_log(log)
         names = {a["name"] for a in state["anomalies"]}
         assert "error_rate_high" in names
+
+
+class TestIngestMcpTrace:
+    def test_success_response_creates_observation(self, adapter, monitor):
+        trace = [
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+             "params": {"name": "get_test_results", "arguments": {"test_id": "1"}}},
+            {"jsonrpc": "2.0", "id": 1, "_latency_ms": 200,
+             "result": {"content": [], "isError": False}},
+        ]
+        state = adapter.ingest_mcp_trace(trace, product=CiscoMCPAdapter.THOUSANDEYES)
+        assert "thousandeyes.get_test_results" in state["agents"]
+
+    def test_jsonrpc_error_counts_as_failed(self, adapter, monitor):
+        trace = [
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+             "params": {"name": "missing_tool", "arguments": {}}},
+            {"jsonrpc": "2.0", "id": 1, "_latency_ms": 10,
+             "error": {"code": -32601, "message": "Method not found"}},
+        ]
+        state = adapter.ingest_mcp_trace(trace, product=CiscoMCPAdapter.THOUSANDEYES)
+        agent = state["agents"]["thousandeyes.missing_tool"]
+        assert agent["error_rate"] > 0
+
+    def test_is_error_true_counts_as_failed(self, adapter, monitor):
+        trace = [
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+             "params": {"name": "get_alerts", "arguments": {}}},
+            {"jsonrpc": "2.0", "id": 1, "_latency_ms": 80,
+             "result": {"content": [], "isError": True}},
+        ]
+        state = adapter.ingest_mcp_trace(trace, product=CiscoMCPAdapter.THOUSANDEYES)
+        assert state["agents"]["thousandeyes.get_alerts"]["error_rate"] > 0
+
+    def test_uses_adapter_product_when_not_passed(self, monitor):
+        adapter = CiscoMCPAdapter(monitor, product=CiscoMCPAdapter.WEBEX)
+        trace = [
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+             "params": {"name": "send_message", "arguments": {}}},
+            {"jsonrpc": "2.0", "id": 1, "_latency_ms": 100,
+             "result": {"content": [], "isError": False}},
+        ]
+        state = adapter.ingest_mcp_trace(trace)
+        assert "webex.send_message" in state["agents"]
+
+    def test_unmatched_response_ignored(self, adapter, monitor):
+        trace = [
+            # Response with no matching request
+            {"jsonrpc": "2.0", "id": 99, "_latency_ms": 50,
+             "result": {"content": [], "isError": False}},
+        ]
+        state = adapter.ingest_mcp_trace(trace, product=CiscoMCPAdapter.THOUSANDEYES)
+        assert state["agents"] == {}
