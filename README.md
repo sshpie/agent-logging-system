@@ -13,7 +13,6 @@
 <div align="center">
 Operational monitor for <strong>Cisco AI agent pipelines</strong> — Meraki, NSO, Webex, ThousandEyes, Catalyst Center.<br>
 Per-tool rolling windows, baseline-relative anomaly detection, Webex Adaptive Card alerts, and a NOC bot interface.<br>
-Zero external dependencies.
 </div>
 
 ---
