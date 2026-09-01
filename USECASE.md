@@ -1,35 +1,45 @@
 # Use Case: Operational Observability for Cisco MCP Server Fleets
 
-## Business Problem
+## Problem
 
-Cisco MCP servers (ThousandEyes, Webex, Catalyst Center, Nexus Dashboard, Catalyst SD-WAN, IOS-XE) expose tools to agentic pipelines via the Model Context Protocol. When an agentic pipeline degrades — slow tool responses, rising error rates, empty outputs — the failure is invisible. There is no native mechanism to watch which MCP tool is breaking, how often, or whether the degradation is worsening.
+Cisco MCP servers (ThousandEyes, Webex, Catalyst Center, Nexus Dashboard, SD-WAN, IOS XE) integrate into AI agent pipelines. When a tool inside one of those servers degrades — slow responses, rising error rates, empty outputs — the pipeline continues silently. The calling agent produces stale or incomplete results. No alert fires. The operator finds out from downstream impact, not from the tool.
 
-Network operations teams cannot act on what they cannot see.
+Standard logging captures that calls happened. It does not detect that a specific tool is degrading relative to its own baseline.
 
 ## Solution
 
-`agent-logging-system` monitors Cisco MCP tool calls in real time. Each tool call is logged as an Observation attributed to `<product>.<tool_name>`, giving per-tool error rates and per-product latency trends in a single monitor.
+`agent-logging-system` places a monitor at the MCP adapter layer. Every tool call becomes a structured `Observation`. The monitor tracks a rolling window per tool, computes baseline-relative statistics, and fires named recommendations when a tool crosses a threshold.
 
-The monitor compares each tool against its own baseline (not a fixed threshold), so a steady-slow tool never alarms but a tool that suddenly degrades does. When a threshold is crossed, the monitor names the broken agent and the recommended action.
+The `CiscoMCPAdapter` translates MCP tool invocations into observations with `agent_id = "<product>.<tool_name>"`. Each tool gets its own rolling window — `thousandeyes.get_alerts` and `webex.send_message` are tracked independently. A flaky tool appears as a named anomaly, not as noise in an aggregate metric.
 
-No database. No external collector. No dependencies. The monitor runs in the same process as the agentic pipeline.
+## How it works
 
-## Target Users
+```
+Cisco MCP server tool call
+            │
+            ▼
+  CiscoMCPAdapter.log_tool_call()
+  (product="thousandeyes", tool="get_alerts", latency_ms=8200, status="success")
+            │
+            ▼
+  agent_id = "thousandeyes.get_alerts"
+  LoggingAgent.ingest(Observation(...))
+            │
+            ▼
+  StateModel — rolling 20-obs window per tool
+  AnomalyDetector — latency_high if avg exceeds 3x baseline
+            │
+            ▼
+  { anomalies: [{ rule: "latency_high", agent: "thousandeyes.get_alerts" }],
+    recommendations: [{ action: "throttle_input" }] }
+```
 
-- Network automation engineers running Cisco MCP server fleets
-- Platform teams integrating ThousandEyes, Webex, or Catalyst Center into agentic pipelines
-- Anyone building multi-agent workflows on top of Cisco infrastructure who needs per-tool observability
+## Key behaviors
 
-## Cisco Products Covered
-
-| Product | MCP Server | Adapter constant |
-|---------|-----------|-----------------|
-| ThousandEyes | thousandeyes-mcp | `CiscoMCPAdapter.THOUSANDEYES` |
-| Webex | webex-mcp | `CiscoMCPAdapter.WEBEX` |
-| Catalyst Center | catalyst-center-mcp | `CiscoMCPAdapter.CATALYST_CENTER` |
-| Nexus Dashboard | nexus-dashboard-mcp | `CiscoMCPAdapter.NEXUS_DASHBOARD` |
-| Catalyst SD-WAN | catalyst-sdwan-mcp | `CiscoMCPAdapter.CATALYST_SDWAN` |
-| IOS-XE | ios-xe-mcp | `CiscoMCPAdapter.IOS_XE` |
+- **Baseline-relative alarms** — a consistently slow tool never trips. A tool that spikes 3x its own baseline does.
+- **Generation latency never alarms** — streaming tools like Webex event streams log duration as `LATENCY_GENERATION`. Any magnitude is expected.
+- **Bulk import** — `ingest_session_log()` replays a full recorded MCP session log. Useful for post-mortem analysis.
+- **No external dependencies** — stdlib only. No collector, no database, no network calls.
 
 ## Example
 
@@ -40,23 +50,32 @@ from agent_logging_system.adapters.cisco_mcp_adapter import CiscoMCPAdapter
 monitor = LoggingAgent()
 adapter = CiscoMCPAdapter(monitor)
 
-# Log a ThousandEyes tool call
+# Log each MCP tool call as it executes:
 adapter.log_tool_call(
-    tool_name="get_alerts",
-    latency_ms=340,
-    status="success",
+    tool_name="get_test_results",
     product=CiscoMCPAdapter.THOUSANDEYES,
-    input_data={"agent_id": "1234"},
-    output_data={"alerts": []},
+    latency_ms=8200,
+    status="success",
+    input_data={"test_id": "123"},
+    output_data={"results": []},
 )
 
-state = adapter.get_state()
-print(state["anomalies"])       # [] — no alarm yet
-print(state["recommendations"]) # []
+state = monitor.get_system_state()
+for anomaly in state["anomalies"]:
+    print(f"{anomaly['agent_id']}: {anomaly['rule']} -> {anomaly['recommendation']}")
 ```
 
-After repeated slow calls, the monitor trips `latency_high` and recommends `throttle_input` — identifying the exact tool and the exact product without manual inspection.
+## Cisco products covered
 
-## Why This Matters
+| Product constant | MCP server |
+|-----------------|------------|
+| `THOUSANDEYES` | ThousandEyes Enterprise Monitoring |
+| `WEBEX` | Webex Collaboration |
+| `CATALYST_CENTER` | Catalyst Center |
+| `NEXUS_DASHBOARD` | Nexus Dashboard |
+| `CATALYST_SDWAN` | Catalyst SD-WAN |
+| `IOS_XE` | IOS XE |
 
-Agentic pipelines fail silently. A ThousandEyes alert tool returning empty results 30% of the time looks like normal operation from the outside. From the inside, network operations is flying blind. `agent-logging-system` makes the invisible visible — per tool, per product, in real time.
+## Target users
+
+Network operations teams running AI agents that call Cisco MCP servers in production. The monitor surfaces the tool-level signal that aggregate logs miss.

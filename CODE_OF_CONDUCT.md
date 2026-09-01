@@ -1,20 +1,23 @@
 # Code of Conduct
 
-## Our Standards
+This project follows the [Contributor Covenant](https://www.contributor-covenant.org/) version 2.1.
 
-- Use welcoming and inclusive language
-- Respect differing viewpoints and experiences
-- Accept constructive criticism
-- Focus on what is best for the community
+## Our standards
 
-## Unacceptable Behavior
+- Respectful, constructive communication
+- Welcoming to contributors of all experience levels
+- Focus on what is best for the project and its users
 
-- Harassment, insults, or personal attacks
-- Publishing others' private information without permission
-- Other conduct reasonably considered unprofessional
+## Unacceptable behavior
+
+- Harassment or discrimination of any kind
+- Personal attacks
+- Public or private harassment
 
 ## Enforcement
 
-Instances of unacceptable behavior may be reported by opening an issue. Project maintainers will review and respond appropriately.
+Violations may be reported to the maintainers via GitHub issues. All reports will be reviewed and investigated. Maintainers will respond in a way that is deemed necessary and appropriate.
 
-This Code of Conduct is adapted from the [Contributor Covenant](https://www.contributor-covenant.org), version 2.1.
+## Attribution
+
+This Code of Conduct is adapted from the [Contributor Covenant](https://www.contributor-covenant.org/), version 2.1.

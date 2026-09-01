@@ -244,6 +244,30 @@ adapter.ingest_session_log({
 
 Products: `THOUSANDEYES`, `WEBEX`, `CATALYST_CENTER`, `NEXUS_DASHBOARD`, `CATALYST_SDWAN`, `IOS_XE`.
 
+**`CiscoMCPAdapter`** — monitor Cisco MCP server tool calls (ThousandEyes, Webex, Catalyst Center, Nexus Dashboard, SD-WAN, IOS XE). Each tool tracked independently as `<product>.<tool_name>`. A degrading tool appears as a named anomaly, not as noise in an aggregate.
+
+```python
+from agent_logging_system import LoggingAgent
+from agent_logging_system.adapters.cisco_mcp_adapter import CiscoMCPAdapter
+
+monitor = LoggingAgent()
+adapter = CiscoMCPAdapter(monitor)
+
+# Single tool call:
+adapter.log_tool_call(
+    tool_name="get_test_results",
+    product=CiscoMCPAdapter.THOUSANDEYES,
+    latency_ms=8200,
+    status="success",
+    input_data={"test_id": "123"},
+    output_data={"results": []},
+)
+
+# Bulk import from a recorded MCP session log:
+state = adapter.ingest_session_log(session_log)
+print(state["anomalies"])
+```
+
 **Custom rules:**
 
 ```python
