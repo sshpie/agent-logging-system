@@ -194,79 +194,100 @@ orch.log_synthesis(18000)                                               # genera
 print(orch.get_state()["anomalies"])
 ```
 
-**`WarrantAdapter`** — book-grounded coding agent. Reasoning and code generation log as generation latency. Citation checks log as machine latency — a slow lookup is a real signal.
+**`WarrantAdapter`** — coding agent. Reasoning and code generation log as generation latency. Citation checks log as machine latency — a slow lookup is a real signal.
 
-**`AimapAdapter`** — feed a completed aimap JSON report into the monitor. Translates the three aimap phases (port discovery, fingerprint, per-enumerator enum) into observations attributed per enumerator, so per-enumerator error rates are visible.
+**`AimapAdapter`** — feed a completed aimap JSON report into the monitor. Translates the three aimap phases (port discovery, fingerprint, per-enumerator enum) into observations per enumerator.
 
 ```python
-from agent_logging_system import LoggingAgent
 from agent_logging_system.adapters.aimap_adapter import AimapAdapter
 
-monitor = LoggingAgent()
-adapter = AimapAdapter(monitor)
+adapter = AimapAdapter(LoggingAgent())
 state = adapter.ingest_report("/tmp/aimap-report.json")
 print(state["anomalies"])
 ```
 
-**`CiscoMCPAdapter`** — monitor a fleet of Cisco MCP server tool calls (ThousandEyes, Webex, Catalyst Center, Nexus Dashboard, Catalyst SD-WAN, IOS-XE). Each tool call is attributed to `<product>.<tool_name>`, giving per-tool error rates and per-product latency trends in a single monitor.
+**`CiscoMCPAdapter`** — monitor Cisco MCP server tool calls. Each tool tracked independently as `<product>.<tool_name>`. Supports three integration paths:
 
 ```python
-from agent_logging_system import LoggingAgent
-from agent_logging_system.adapters.cisco_mcp_adapter import CiscoMCPAdapter
+from agent_logging_system.adapters import CiscoMCPAdapter
 
-monitor = LoggingAgent()
-adapter = CiscoMCPAdapter(monitor)
+adapter = CiscoMCPAdapter(LoggingAgent())
 
-adapter.log_tool_call(
-    tool_name="get_alerts",
-    latency_ms=340,
-    status="success",
-    product=CiscoMCPAdapter.THOUSANDEYES,
-    input_data={"agent_id": "1234"},
-    output_data={"alerts": []},
-)
+# 1. Single call:
+adapter.log_tool_call("get_alerts", product=CiscoMCPAdapter.THOUSANDEYES, latency_ms=340)
 
-print(adapter.get_state()["anomalies"])
+# 2. Bulk session log:
+adapter.ingest_session_log({"product": "thousandeyes", "tool_calls": [...]})
+
+# 3. Real MCP JSON-RPC 2.0 wire trace:
+adapter.ingest_mcp_trace(trace_messages, product=CiscoMCPAdapter.THOUSANDEYES)
 ```
 
-Batch ingest from an MCP session log:
+Products: `THOUSANDEYES`, `WEBEX`, `WEBEX_MESSAGING`, `CATALYST_CENTER`, `NEXUS_DASHBOARD`, `CATALYST_SDWAN`, `IOS_XE`, `MERAKI`, `NSO`.
+
+**`WebexMessagingMCPAdapter`** — pre-configured for the [Webex Messaging MCP Server](https://mcp.webexapis.com/mcp/webex-messaging). Knows all 24 tools (`webex-create-message`, `webex-list-spaces`, etc.) and classifies read/write/stream automatically.
 
 ```python
-adapter.ingest_session_log({
-    "tool_calls": [
-        {"tool": "get_tests",   "product": "thousandeyes",   "latency_ms": 280, "status": "success"},
-        {"tool": "list_rooms",  "product": "webex",          "latency_ms": 150, "status": "success"},
-        {"tool": "get_devices", "product": "catalyst_center","latency_ms": 900, "status": "failed",
-         "error": "timeout"},
-    ]
-})
+from agent_logging_system.adapters import WebexMessagingMCPAdapter
+
+adapter = WebexMessagingMCPAdapter(LoggingAgent())
+session = adapter.wrap_agent(mcp_client_session)   # auto-intercepts every tool call
+await session.async_call_tool("webex-create-message", {"roomId": "...", "text": "Hello"})
 ```
 
-Products: `THOUSANDEYES`, `WEBEX`, `CATALYST_CENTER`, `NEXUS_DASHBOARD`, `CATALYST_SDWAN`, `IOS_XE`.
-
-**`CiscoMCPAdapter`** — monitor Cisco MCP server tool calls (ThousandEyes, Webex, Catalyst Center, Nexus Dashboard, SD-WAN, IOS XE). Each tool tracked independently as `<product>.<tool_name>`. A degrading tool appears as a named anomaly, not as noise in an aggregate.
+**`MerakiAdapter`** — monitor Cisco Meraki Dashboard API calls. Tracks `X-RateLimit-Remaining` and fires a `MEDIUM` anomaly at 20% remaining, `HIGH` on 429. Accepts the `observe()` context manager, `log_api_call()`, or raw response headers via `ingest_response_headers()`.
 
 ```python
-from agent_logging_system import LoggingAgent
-from agent_logging_system.adapters.cisco_mcp_adapter import CiscoMCPAdapter
+from agent_logging_system.adapters import MerakiAdapter
 
-monitor = LoggingAgent()
-adapter = CiscoMCPAdapter(monitor)
+adapter = MerakiAdapter(LoggingAgent(), organization_id="org-L_123456")
 
-# Single tool call:
-adapter.log_tool_call(
-    tool_name="get_test_results",
-    product=CiscoMCPAdapter.THOUSANDEYES,
-    latency_ms=8200,
-    status="success",
-    input_data={"test_id": "123"},
-    output_data={"results": []},
-)
-
-# Bulk import from a recorded MCP session log:
-state = adapter.ingest_session_log(session_log)
-print(state["anomalies"])
+with adapter.observe("networks.getNetworkDevices") as obs:
+    result = dashboard.networks.getNetworkDevices(networkId=net_id)
+    obs.rate_limit_remaining = int(resp.headers["X-RateLimit-Remaining"])
+    obs.result_count = len(result)
 ```
+
+**`NSOAdapter`** — monitor Cisco NSO RESTCONF/NETCONF/PyAPI operations. Operation-aware: `sync-from` and `sync-all` use generation latency (no latency alarm). `commit` and `check-sync` use machine latency — a slow commit is a real signal.
+
+```python
+from agent_logging_system.adapters import NSOAdapter
+
+adapter = NSOAdapter(LoggingAgent(), nso_host="nso.corp.example.com")
+
+with adapter.observe("sync_from", device="edge-router-01") as obs:
+    result = maapi_session.sync_from("edge-router-01")
+
+adapter.log_commit(dry_run=True, latency_ms=155.0, changeset_size=12)
+adapter.ingest_restconf_response("/restconf/operations/tailf-ncs:sync-from", "POST", 200, 5200.0)
+```
+
+**`WebexNotifier`** — forward anomalies to a Webex room. Supports plain text, Markdown, and Adaptive Cards.
+
+```python
+from agent_logging_system.alerting import WebexNotifier
+
+notifier = WebexNotifier(bot_token="...", room_id="...", min_level="HIGH")
+notifier.notify_if_anomalies(state)         # plain text
+notifier.notify_if_anomalies_card(state)    # Adaptive Card with severity color-coding
+```
+
+**MCP server mode** — expose the monitor as an MCP server so any Claude/Webex/ThousandEyes AI agent can query it directly:
+
+```bash
+python -m agent_logging_system.mcp_server --host 0.0.0.0 --port 8421 --api-key your-key
+```
+
+Or embedded:
+
+```python
+from agent_logging_system.mcp_server import ALSMCPServer
+
+server = ALSMCPServer(monitor, host="0.0.0.0", port=8421, api_key="your-key")
+server.start_background()   # daemon thread
+```
+
+Tools exposed: `als-get-fleet-state`, `als-get-anomalies`, `als-check-agent`, `als-get-recommendations`.
 
 **Custom rules:**
 
@@ -355,6 +376,9 @@ python examples/warrant_integration.py      # Warrant adapter: reasoning, code, 
 python examples/orchestrator_integration.py # O->S->H fan-out: slow lane alarms, long synthesis does not
 python examples/session_replay.py           # replay a session transcript through the monitor
 python examples/self_monitor.py             # the monitor watching itself, with real perf timings
+python examples/cisco_thousandeyes.py       # ThousandEyes MCP: wrap_agent, manual log, trace ingest
+python examples/cisco_meraki.py             # Meraki Dashboard API: rate limit tracking, 429 anomaly
+python examples/cisco_nso.py               # NSO RESTCONF/PyAPI: sync-from, commit, service deploy
 ```
 
 Run the test suite:

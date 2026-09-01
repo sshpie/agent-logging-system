@@ -1,81 +1,125 @@
-# Use Case: Operational Observability for Cisco MCP Server Fleets
+# Use Case: Operational Observability for Cisco AI Agent Pipelines
 
 ## Problem
 
-Cisco MCP servers (ThousandEyes, Webex, Catalyst Center, Nexus Dashboard, SD-WAN, IOS XE) integrate into AI agent pipelines. When a tool inside one of those servers degrades — slow responses, rising error rates, empty outputs — the pipeline continues silently. The calling agent produces stale or incomplete results. No alert fires. The operator finds out from downstream impact, not from the tool.
+Cisco platforms — Meraki, ThousandEyes, Webex, Catalyst Center, Nexus Dashboard, NSO, SD-WAN, IOS XE — integrate into AI agent pipelines through MCP servers and REST APIs. When a tool inside those systems degrades — slow responses, rising error rates, 429 throttling, unreachable devices — the pipeline continues silently. The calling agent produces stale or incomplete results. No alert fires. The operator finds out from downstream impact, not from the tool.
 
-Standard logging captures that calls happened. It does not detect that a specific tool is degrading relative to its own baseline.
+Standard logging captures that calls happened. It does not detect that a specific tool is degrading relative to its own baseline, or that Meraki rate limit budget is nearly exhausted, or that an NSO `sync-from` is failing consistently on one device.
 
 ## Solution
 
-`agent-logging-system` places a monitor at the MCP adapter layer. Every tool call becomes a structured `Observation`. The monitor tracks a rolling window per tool, computes baseline-relative statistics, and fires named recommendations when a tool crosses a threshold.
+`agent-logging-system` places a monitor at the adapter layer between your AI agents and Cisco systems. Every tool call, API call, or RESTCONF operation becomes a structured `Observation`. The monitor tracks a rolling window per tool, computes baseline-relative statistics, and fires named recommendations when a component crosses a threshold.
 
-The `CiscoMCPAdapter` translates MCP tool invocations into observations with `agent_id = "<product>.<tool_name>"`. Each tool gets its own rolling window — `thousandeyes.get_alerts` and `webex.send_message` are tracked independently. A flaky tool appears as a named anomaly, not as noise in an aggregate metric.
+Each tool gets its own rolling window — `thousandeyes.get_alerts` and `webex.send_message` are tracked independently. A flaky tool appears as a named anomaly. The monitor can send Webex Adaptive Card alerts and expose a queryable MCP endpoint so any Cisco AI agent can check fleet health directly.
 
-## How it works
+## Architecture
 
 ```
-Cisco MCP server tool call
-            │
-            ▼
-  CiscoMCPAdapter.log_tool_call()
-  (product="thousandeyes", tool="get_alerts", latency_ms=8200, status="success")
-            │
-            ▼
-  agent_id = "thousandeyes.get_alerts"
-  LoggingAgent.ingest(Observation(...))
-            │
-            ▼
-  StateModel — rolling 20-obs window per tool
-  AnomalyDetector — latency_high if avg exceeds 3x baseline
-            │
-            ▼
-  { anomalies: [{ rule: "latency_high", agent: "thousandeyes.get_alerts" }],
-    recommendations: [{ action: "throttle_input" }] }
-```
-
-## Key behaviors
-
-- **Baseline-relative alarms** — a consistently slow tool never trips. A tool that spikes 3x its own baseline does.
-- **Generation latency never alarms** — streaming tools like Webex event streams log duration as `LATENCY_GENERATION`. Any magnitude is expected.
-- **Bulk import** — `ingest_session_log()` replays a full recorded MCP session log. Useful for post-mortem analysis.
-- **No external dependencies** — stdlib only. No collector, no database, no network calls.
-
-## Example
-
-```python
-from agent_logging_system import LoggingAgent
-from agent_logging_system.adapters.cisco_mcp_adapter import CiscoMCPAdapter
-
-monitor = LoggingAgent()
-adapter = CiscoMCPAdapter(monitor)
-
-# Log each MCP tool call as it executes:
-adapter.log_tool_call(
-    tool_name="get_test_results",
-    product=CiscoMCPAdapter.THOUSANDEYES,
-    latency_ms=8200,
-    status="success",
-    input_data={"test_id": "123"},
-    output_data={"results": []},
-)
-
-state = monitor.get_system_state()
-for anomaly in state["anomalies"]:
-    print(f"{anomaly['agent_id']}: {anomaly['rule']} -> {anomaly['recommendation']}")
+Cisco AI agent pipeline
+         │
+         ├─ Meraki Dashboard API ───────► MerakiAdapter
+         │                                  rate limit tracking
+         │                                  429 anomaly (HIGH)
+         │
+         ├─ NSO RESTCONF / PyAPI ────────► NSOAdapter
+         │                                  per-operation latency classes
+         │                                  device-scoped failure tracking
+         │
+         ├─ Webex Messaging MCP ─────────► WebexMessagingMCPAdapter
+         │                                  24 tools pre-classified
+         │                                  wrap_agent() auto-intercepts
+         │
+         ├─ ThousandEyes / Catalyst ─────► CiscoMCPAdapter
+         │  Center / Nexus / SD-WAN /        <product>.<tool_name> tracking
+         │  IOS XE / Webex                   MCP JSON-RPC trace ingest
+         │
+         └─ Any MCP-compatible server ──► CiscoMCPAdapter
+                                            ingest_mcp_trace()
+                                            │
+                                            ▼
+                               LoggingAgent.ingest(Observation)
+                                            │
+                                            ▼
+                               StateModel — rolling 20-obs window per tool
+                               AnomalyDetector — latency_high / error_rate_high
+                                            │
+                                            ├─► WebexNotifier → Webex room (Adaptive Card)
+                                            │
+                                            └─► ALSMCPServer → queryable by any agent
+                                                POST /mcp tools:
+                                                  als-get-fleet-state
+                                                  als-get-anomalies
+                                                  als-check-agent
+                                                  als-get-recommendations
 ```
 
 ## Cisco products covered
 
-| Product constant | MCP server |
-|-----------------|------------|
-| `THOUSANDEYES` | ThousandEyes Enterprise Monitoring |
-| `WEBEX` | Webex Collaboration |
-| `CATALYST_CENTER` | Catalyst Center |
-| `NEXUS_DASHBOARD` | Nexus Dashboard |
-| `CATALYST_SDWAN` | Catalyst SD-WAN |
-| `IOS_XE` | IOS XE |
+| Adapter | Product | Key behavior |
+|---------|---------|-------------|
+| `MerakiAdapter` | Meraki Dashboard API | Rate limit header tracking; MEDIUM at 20% remaining; HIGH on 429 |
+| `NSOAdapter` | Crosswork NSO | `sync-from`/`sync-all` = generation latency (no alarm); `commit`/`check-sync` = machine latency |
+| `WebexMessagingMCPAdapter` | Webex Messaging MCP Server | 24 tools pre-classified (read/write/stream); streaming tools never alarm on latency |
+| `CiscoMCPAdapter` | ThousandEyes, Webex, Catalyst Center, Nexus Dashboard, Catalyst SD-WAN, IOS XE | `<product>.<tool_name>` per-tool windows; MCP JSON-RPC 2.0 trace ingest |
+
+## Key behaviors
+
+- **Baseline-relative alarms** — a consistently slow tool never trips. A tool that spikes 3x its own baseline does.
+- **Generation latency never alarms** — streaming tools, paginated API calls, NSO bulk syncs log as `LATENCY_GENERATION`. Any magnitude is expected.
+- **Meraki rate limit tracking** — `X-RateLimit-Remaining` is parsed on every call. A budget below 20% fires `MEDIUM`; a 429 fires `HIGH` immediately.
+- **NSO operation-class awareness** — `sync-from` and `re-deploy-all` are classified as long-running. `commit` and `check-sync` are machine-latency operations.
+- **MCP server mode** — the monitor exposes itself as an MCP server so any Claude, Webex AI, or ThousandEyes agent can query it: `POST /mcp tools/call als-get-anomalies`.
+- **Webex Adaptive Cards** — `WebexNotifier.notify_if_anomalies_card()` sends structured cards with severity color-coding and per-anomaly recommendation rows.
+- **No external dependencies** — stdlib only. No collector, no database, no network calls required.
+
+## Example: Meraki rate limit anomaly
+
+```python
+from agent_logging_system import LoggingAgent
+from agent_logging_system.adapters import MerakiAdapter
+from agent_logging_system.alerting import WebexNotifier
+
+monitor = LoggingAgent()
+adapter = MerakiAdapter(monitor, organization_id="your-org-id")
+
+with adapter.observe("networks.getNetworkDevices") as obs:
+    result = dashboard.networks.getNetworkDevices(networkId=net_id)
+    obs.rate_limit_remaining = int(resp.headers["X-RateLimit-Remaining"])
+
+state = monitor.get_system_state()
+
+notifier = WebexNotifier(bot_token="...", room_id="...", min_level="MEDIUM")
+notifier.notify_if_anomalies_card(state)
+```
+
+## Example: Webex Messaging MCP auto-intercept
+
+```python
+from agent_logging_system import LoggingAgent
+from agent_logging_system.adapters import WebexMessagingMCPAdapter
+
+monitor = LoggingAgent()
+adapter = WebexMessagingMCPAdapter(monitor)
+session = adapter.wrap_agent(mcp_client_session)
+
+# Every tool call is now automatically observed.
+await session.async_call_tool("webex-create-message", {"roomId": "...", "text": "Hello"})
+```
+
+## Example: MCP server — any agent can query the monitor
+
+```bash
+python -m agent_logging_system.mcp_server --host 0.0.0.0 --port 8421 --api-key your-key
+```
+
+Now register this HTTPS endpoint in Webex App Hub. Any Cisco AI agent can call:
+
+```json
+POST /mcp
+{"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+ "params": {"name": "als-get-anomalies", "arguments": {"alert_level": "HIGH"}}}
+```
 
 ## Target users
 
-Network operations teams running AI agents that call Cisco MCP servers in production. The monitor surfaces the tool-level signal that aggregate logs miss.
+Network operations and AI platform teams running agent pipelines against Cisco MCP servers and REST APIs. The monitor surfaces the tool-level signal that aggregate logs miss — before downstream impact, not after.

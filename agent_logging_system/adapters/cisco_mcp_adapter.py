@@ -7,12 +7,18 @@ appears as a named anomaly with a recommendation rather than silent degradation.
 agent_id = "<product>.<tool_name>" — per-tool-per-product rolling windows.
 
 Supported products:
-    CiscoMCPAdapter.THOUSANDEYES     ThousandEyes Enterprise Monitoring
-    CiscoMCPAdapter.WEBEX            Webex Collaboration
-    CiscoMCPAdapter.CATALYST_CENTER  Catalyst Center (DNA Center)
-    CiscoMCPAdapter.NEXUS_DASHBOARD  Nexus Dashboard
-    CiscoMCPAdapter.CATALYST_SDWAN   Catalyst SD-WAN
-    CiscoMCPAdapter.IOS_XE           IOS XE
+    CiscoMCPAdapter.THOUSANDEYES      ThousandEyes Enterprise Monitoring
+    CiscoMCPAdapter.WEBEX             Webex Collaboration
+    CiscoMCPAdapter.WEBEX_MESSAGING   Webex Messaging MCP Server (24 pre-classified tools)
+    CiscoMCPAdapter.CATALYST_CENTER   Catalyst Center (DNA Center)
+    CiscoMCPAdapter.NEXUS_DASHBOARD   Nexus Dashboard
+    CiscoMCPAdapter.CATALYST_SDWAN    Catalyst SD-WAN
+    CiscoMCPAdapter.IOS_XE            IOS XE
+    CiscoMCPAdapter.MERAKI            Meraki Dashboard API
+    CiscoMCPAdapter.NSO               Crosswork NSO
+
+For Meraki and NSO, prefer the purpose-built adapters (MerakiAdapter, NSOAdapter)
+which understand rate limits, pagination, and operation-class latency expectations.
 
 Usage — automatic interception via wrap_agent():
 
@@ -178,10 +184,13 @@ class CiscoMCPAdapter(BaseAdapter):
     # Product name constants — use these as the `product` argument.
     THOUSANDEYES = "thousandeyes"
     WEBEX = "webex"
+    WEBEX_MESSAGING = "webex_messaging"   # Webex Messaging MCP Server (24 tools)
     CATALYST_CENTER = "catalyst_center"
     NEXUS_DASHBOARD = "nexus_dashboard"
     CATALYST_SDWAN = "catalyst_sdwan"
     IOS_XE = "ios_xe"
+    MERAKI = "meraki"                     # Meraki Dashboard API (use MerakiAdapter for rate-limit tracking)
+    NSO = "nso"                           # Crosswork NSO RESTCONF/NETCONF (use NSOAdapter)
 
     def __init__(self, logging_agent: LoggingAgent, product: str = ""):
         super().__init__(logging_agent)
