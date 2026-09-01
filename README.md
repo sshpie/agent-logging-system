@@ -320,4 +320,4 @@ Not a tracer, profiler, or logging framework. No stack frames, no output capture
 
 ## License
 
-MIT. Part of the sshpie toolchain.
+MIT.
