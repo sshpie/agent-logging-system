@@ -45,12 +45,9 @@ Cisco AI agent pipeline
                                             │
                                             ├─► WebexNotifier → Webex room (Adaptive Card)
                                             │
-                                            └─► ALSMCPServer → queryable by any agent
-                                                POST /mcp tools:
-                                                  als-get-fleet-state
-                                                  als-get-anomalies
-                                                  als-check-agent
-                                                  als-get-recommendations
+                                            └─► WebexBotHandler → NOC operator interface
+                                                als status / anomalies / check / recommend
+                                                polling mode (no HTTPS) or webhook mode
 ```
 
 ## Cisco products covered
@@ -68,7 +65,7 @@ Cisco AI agent pipeline
 - **Generation latency never alarms** — streaming tools, paginated API calls, NSO bulk syncs log as `LATENCY_GENERATION`. Any magnitude is expected.
 - **Meraki rate limit tracking** — `X-RateLimit-Remaining` is parsed on every call. A budget below 20% fires `MEDIUM`; a 429 fires `HIGH` immediately.
 - **NSO operation-class awareness** — `sync-from` and `re-deploy-all` are classified as long-running. `commit` and `check-sync` are machine-latency operations.
-- **MCP server mode** — the monitor exposes itself as an MCP server so any Claude, Webex AI, or ThousandEyes agent can query it: `POST /mcp tools/call als-get-anomalies`.
+- **Webex bot command interface** — `WebexBotHandler` lets NOC operators query live monitor state from any Webex space (`als status`, `als anomalies HIGH`, `als check <agent_id>`). Responds with Adaptive Cards. Polling mode requires no inbound HTTPS; webhook mode integrates with Webex event push.
 - **Webex Adaptive Cards** — `WebexNotifier.notify_if_anomalies_card()` sends structured cards with severity color-coding and per-anomaly recommendation rows.
 - **No external dependencies** — stdlib only. No collector, no database, no network calls required.
 
@@ -106,19 +103,30 @@ session = adapter.wrap_agent(mcp_client_session)
 await session.async_call_tool("webex-create-message", {"roomId": "...", "text": "Hello"})
 ```
 
-## Example: MCP server — any agent can query the monitor
+## Example: Webex bot — NOC operator command interface
 
-```bash
-python -m agent_logging_system.mcp_server --host 0.0.0.0 --port 8421 --api-key your-key
+```python
+from agent_logging_system import LoggingAgent
+from agent_logging_system.alerting import WebexNotifier, WebexBotHandler
+from agent_logging_system.alerting.webex_bot import WebexBotPoller
+
+monitor  = LoggingAgent()
+notifier = WebexNotifier(bot_token="...", room_id="...", min_level="LOW")
+handler  = WebexBotHandler(monitor, notifier)
+
+# Polling mode — no inbound HTTPS required.
+poller = WebexBotPoller(handler, bot_token="...", room_ids=["room-id"], poll_interval=5.0)
+poller.poll_forever()
 ```
 
-Now register this HTTPS endpoint in Webex App Hub. Any Cisco AI agent can call:
+Operators send commands from any Webex client. The bot replies with an Adaptive Card:
 
-```json
-POST /mcp
-{"jsonrpc": "2.0", "id": 1, "method": "tools/call",
- "params": {"name": "als-get-anomalies", "arguments": {"alert_level": "HIGH"}}}
-```
+| Command | Response |
+|---------|---------|
+| `als status` | Fleet snapshot: agent count + anomaly counts by level |
+| `als anomalies HIGH` | Anomalies at HIGH severity with recommendations |
+| `als check nso.sync_from.edge-router-01` | Rolling-window state for one agent |
+| `als recommend` | Full recommendation list |
 
 ## Target users
 

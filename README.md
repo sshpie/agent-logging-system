@@ -53,10 +53,11 @@ The design maps OT/ICS shift-operations discipline onto AI pipelines: watch the 
 - **Custom rules** via `AnomalyRule(name, check, alert_level, recommendation)`
 - **O(1) ingest**, incremental scan (~15-27 µs for 5 agents)
 - **Stdlib only** — no database, no file on disk, no external collector
-- **Cisco MCP adapter** — per-tool rolling windows across ThousandEyes, Webex, Catalyst Center, Nexus Dashboard, SD-WAN, IOS XE, Meraki, NSO
+- **Cisco adapter suite** — MCP (ThousandEyes, Webex, Catalyst Center, Nexus Dashboard, SD-WAN, IOS XE), Meraki Dashboard API, NSO RESTCONF/NETCONF/PyAPI
 - **Meraki rate limit tracking** — `X-RateLimit-Remaining` parsed per call; MEDIUM at 20%, HIGH on 429
 - **NSO log ingestion** — parse `ncs.log`, `devel.log`, `audit.log`, `ncserr.log.*` into observations; supports `tail_lines` and live `follow_log_file()` mode
 - **Webex alerting** — Adaptive Cards with severity color-coding via bot token; stdlib only
+- **Webex bot handler** — NOC command interface; `als status/anomalies/check/recommend` responds with Adaptive Cards; polling mode (no HTTPS) or webhook mode
 
 ---
 
@@ -98,6 +99,11 @@ Cisco AI agent pipeline
                                      ▼                             ▼
                              { agents, anomalies,        WebexNotifier
                                recommendations }         Adaptive Card alert
+                                                                   │
+                                                          WebexBotHandler
+                                                     NOC operator command interface
+                                                     als status / anomalies / check
+                                                     polling mode or webhook mode
 ```
 
 ---
@@ -307,9 +313,44 @@ notifier = WebexNotifier(bot_token="...", room_id="...", min_level="HIGH")
 
 notifier.notify_if_anomalies(state)       # plain text
 notifier.notify_if_anomalies_card(state)  # Adaptive Card: severity color, anomaly table, recommendations
+notifier.send_adaptive_card(card_body)    # raw Adaptive Card body (list of card elements)
 ```
 
 Setup: create a bot at `developer.webex.com/my-apps/new/bot`, add it to a room, pass the token and room ID.
+
+---
+
+**`WebexBotHandler`** — NOC operator command interface. Parses inbound messages from a Webex space and responds with Adaptive Cards showing live monitor state.
+
+```python
+from agent_logging_system.alerting import WebexBotHandler
+from agent_logging_system.alerting.webex_bot import WebexBotPoller, WebexBotServer
+
+handler = WebexBotHandler(monitor, notifier)
+
+# Polling mode — no inbound HTTPS:
+poller = WebexBotPoller(handler, bot_token="...", room_ids=["room-id"], poll_interval=5.0)
+poller.poll_forever()
+
+# Webhook mode — Webex pushes events; requires HTTPS endpoint:
+server = WebexBotServer(handler, host="0.0.0.0", port=8422,
+                        bot_token="...", webhook_secret="...")
+server.serve_forever()
+
+# Register the webhook once (after the HTTPS endpoint is live):
+WebexBotServer.register_webhook(bot_token="...", target_url="https://your-domain.com/webhook")
+```
+
+Commands (send from any Webex client in the space):
+
+| Command | Response |
+|---------|---------|
+| `als status` | Fleet snapshot — agent count + anomaly summary by level |
+| `als anomalies` | All active anomalies |
+| `als anomalies HIGH` | Anomalies filtered to HIGH (or MEDIUM, LOW) |
+| `als check <agent_id>` | Single agent rolling-window state |
+| `als recommend` | Active recommendations |
+| `als help` | Command reference |
 
 ---
 
@@ -402,6 +443,7 @@ python examples/self_monitor.py             # the monitor watching itself, with 
 python examples/cisco_thousandeyes.py       # ThousandEyes MCP: wrap_agent, manual log, trace ingest
 python examples/cisco_meraki.py             # Meraki Dashboard API: rate limit tracking, 429 anomaly
 python examples/cisco_nso.py               # NSO RESTCONF/PyAPI/log: sync-from, commit, log ingestion
+python examples/cisco_webex_bot.py         # Webex bot: polling + webhook modes, card responses
 ```
 
 Run the test suite:
